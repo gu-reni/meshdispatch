@@ -65,6 +65,21 @@ The adapters read the logs Hermes already writes and are read-only with respect 
 them — they never modify the sources. Registration is idempotent, so running `sync`
 repeatedly does not create duplicates.
 
+## What this project will never do
+
+An approvals queue that authorises commands is, by definition, one step away from a
+remote command execution surface. This project does not take that step.
+
+**meshdispatch records decisions. It never executes them.** An approved command is
+not run, shelled out to, or evaluated anywhere in this codebase — there is no
+`subprocess`, no `os.system`, no `eval`. The agent that asked for approval is the
+only thing that can act on it, exactly as before. The dashboard decides; the agent
+executes.
+
+Beyond that: single-use nonces, short expiries, decisions bound to their approval
+and task and signed, a second factor required for high-risk entries, an audit entry
+for every request and decision, and a default of denying anything unauthenticated.
+
 ## Task model
 
 | Table | What it holds |
@@ -101,17 +116,17 @@ Also runnable as a module: `python -m meshdispatch list`.
 
 ## Status
 
-**Working, but young.** Phases 1 to 3 are implemented and covered by 96 tests:
-the task model and CLI, the collection adapters, and a dashboard with live push and
-layered authentication. Not yet built: dispatching tasks from the dashboard and the
-click-to-approve queue for guarded commands. See the roadmap below.
+**Working, but young.** Phases 1 to 4 are implemented and covered by 141 tests:
+the task model and CLI, the collection adapters, a dashboard with live push and
+layered authentication, and a control plane that dispatches tasks to registered
+agents and queues guarded commands for approval. See the roadmap below.
 
 | Phase | Scope | State |
 |---|---|---|
 | 1 | Task model, store, registry, CLI | ✅ done |
 | 2 | Adapters (cron / A2A / subagent) + conversation capture | ✅ done |
 | 3 | Web dashboard with server-sent events + authentication | ✅ done |
-| 4 | Dispatch tasks from the dashboard, click-to-approve command queue | 🚧 planned |
+| 4 | Dispatch tasks from the dashboard, click-to-approve command queue | ✅ done |
 | 5 | Cross-server onboarding, packaging, docs | 🚧 planned |
 
 ## License
