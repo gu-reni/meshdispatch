@@ -96,6 +96,16 @@ def build_parser() -> argparse.ArgumentParser:
     eadd.add_argument("--run-id", dest="run_id", type=int)
     eadd.add_argument("--json", action="store_true")
 
+    sync = sub.add_parser("sync", help="Pull tasks from origin adapters")
+    sync.add_argument(
+        "--adapter",
+        choices=["cron", "a2a", "subagent", "all"],
+        default="all",
+        help="which adapter(s) to run (default: all)",
+    )
+    sync.add_argument("--since", help="only sync records at/after this ISO timestamp")
+    sync.add_argument("--json", action="store_true")
+
     return p
 
 
@@ -293,6 +303,31 @@ def _dispatch(args: argparse.Namespace, store: Store) -> int:
             _print_json(ev)
         else:
             print(f"event {ev['id']} ({ev['kind']}) appended to task {ev['task_id']}")
+        return 0
+
+    if cmd == "sync":
+        from .adapters import ADAPTERS, SyncStats
+
+        registry = Registry(store)
+        names = (
+            ["cron", "a2a", "subagent"]
+            if args.adapter == "all"
+            else [args.adapter]
+        )
+        results: dict[str, SyncStats] = {}
+        for name in names:
+            adapter = ADAPTERS[name]()
+            results[name] = adapter.sync(registry, since=args.since)
+        if args.json:
+            _print_json({name: stats.to_dict() for name, stats in results.items()})
+        else:
+            for name, stats in results.items():
+                d = stats.to_dict()
+                print(
+                    f"{name}: tasks_new={d['tasks_new']} tasks_updated={d['tasks_updated']} "
+                    f"runs_new={d['runs_new']} messages_new={d['messages_new']} "
+                    f"events_new={d['events_new']} skipped={d['skipped']}"
+                )
         return 0
 
     print(f"error: unknown command {cmd}", file=sys.stderr)

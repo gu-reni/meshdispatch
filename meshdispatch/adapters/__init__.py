@@ -1,28 +1,34 @@
-"""Adapter interfaces for task origin sources (phase 1: placeholders only).
+"""Origin adapters: cron, subagent, and A2A sources.
 
-Real adapters (cron / a2a / subagent / manual) arrive in a later phase.  This
-package only declares the contract so the registry and future plugins have a
-stable surface to program against.
+Each adapter is read-only with respect to its source files and idempotent with
+respect to the database (``origin + origin_ref`` for tasks; ``source_key`` for
+runs/messages/events).
 """
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from .base import OriginAdapter, SyncStats, hermes_home, local_hostname, parse_since
+from .hermes_cron import CronAdapter
+from .hermes_subagent import SubagentAdapter
+from .a2a import A2AAdapter, infer_peer
 
+# Canonical registry of adapters by their ``origin`` name, used by the CLI's
+# ``sync --adapter`` selector.
+ADAPTERS: dict[str, type] = {
+    CronAdapter.name: CronAdapter,
+    SubagentAdapter.name: SubagentAdapter,
+    A2AAdapter.name: A2AAdapter,
+}
 
-@runtime_checkable
-class OriginAdapter(Protocol):
-    """A source of tasks that can be pulled into the registry.
-
-    Implementations receive a registry and translate their own event/data
-    format into :meth:`meshdispatch.registry.Registry.register` calls.
-    """
-
-    origin: str
-
-    def poll(self, registry: Any) -> list[dict[str, Any]]:
-        """Fetch newly available tasks and return their registration results."""
-        ...
-
-
-__all__ = ["OriginAdapter"]
+__all__ = [
+    "A2AAdapter",
+    "ADAPTERS",
+    "CronAdapter",
+    "OriginAdapter",
+    "SubagentAdapter",
+    "SyncStats",
+    "hermes_home",
+    "infer_peer",
+    "local_hostname",
+    "parse_since",
+]
