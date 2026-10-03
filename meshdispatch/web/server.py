@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping
 from urllib.parse import parse_qs, urlsplit
 
 from ..control.dispatch import UnknownAgent, dispatch as dispatch_task
+from ..control.ingest import apply_ingest
 from ..store import (
     ApprovalConflict,
     ApprovalExpired,
@@ -256,6 +257,12 @@ def create_app(
                 self.client_address[0],
                 self.path,
             )
+            # /api/ingest is a deliberately separate authentication path: it
+            # takes a per-agent bearer token (never a session cookie) and must
+            # never be reachable with session credentials.
+            if request.path == "/api/ingest":
+                self._handle_ingest(request)
+                return
             identity = self._authorize(request)
             if identity is None:
                 return
@@ -284,6 +291,62 @@ def create_app(
             if size <= 0:
                 return ""
             return self.rfile.read(size).decode("utf-8", errors="replace")
+
+        def _handle_ingest(self, request: Request) -> None:
+            """Accept a push batch authenticated by a per-agent bearer token."""
+            authorization = request.headers.get("authorization", "")
+            token = None
+            if isinstance(authorization, str) and authorization.lower().startswith(
+                "bearer "
+            ):
+                token = authorization[7:].strip()
+            if not token:
+                self.close_connection = True
+                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "ingest token required"})
+                return
+            binding = store.verify_ingest_token(token)
+            if binding is None:
+                self.close_connection = True
+                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "invalid ingest token"})
+                return
+
+            raw = self._read_body()
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid JSON body"})
+                return
+            if not isinstance(data, dict):
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST, {"error": "JSON body must be an object"}
+                )
+                return
+
+            agent = data.get("agent")
+            if not isinstance(agent, str) or not agent.strip():
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "agent is required"})
+                return
+            if agent.strip() != binding["agent"]:
+                self.close_connection = True
+                self._send_json(
+                    HTTPStatus.FORBIDDEN,
+                    {"error": "token is bound to a different agent"},
+                )
+                return
+
+            try:
+                result = apply_ingest(
+                    store,
+                    agent=binding["agent"],
+                    tasks=data.get("tasks"),
+                    runs=data.get("runs"),
+                    messages=data.get("messages"),
+                    events=data.get("events"),
+                )
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send_json(HTTPStatus.OK, result)
 
         def _handle_agent_list(self) -> None:
             self._send_json(HTTPStatus.OK, store.list_agents())

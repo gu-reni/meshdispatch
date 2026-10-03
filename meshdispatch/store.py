@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import models
+from .auth.crypto import hash_password, verify_password
 from .redact import redact
 
 DEFAULT_DB_PATH = "meshdispatch.db"
@@ -113,6 +114,14 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_runs_task_id ON runs(task_id);
 CREATE INDEX IF NOT EXISTS idx_messages_task_id ON messages(task_id);
 CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id);
+CREATE TABLE IF NOT EXISTS ingest_tokens (
+    id          TEXT PRIMARY KEY,
+    agent       TEXT NOT NULL,
+    token_hash  TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    revoked_at  TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
 CREATE INDEX IF NOT EXISTS idx_approvals_requested_at ON approvals(requested_at);
 """
@@ -358,6 +367,43 @@ def _redact_payload(payload: Any) -> Any:
     return payload
 
 
+def _serialize_payload(payload: Any) -> str:
+    """Redact and JSON-encode an event payload (any JSON value).
+
+    ``None`` collapses to ``{}``.  Scalars (string, number, boolean) are valid
+    JSON and are stored verbatim; only objects/lists are recursed into for
+    redaction.  Anything the encoder rejects raises the same ``ValueError`` the
+    ingest path turns into a clean per-record error.
+    """
+    if payload is None:
+        payload = {}
+    try:
+        return json.dumps(_redact_payload(payload), ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("payload must be a JSON-serializable object") from exc
+
+
+def generate_ingest_token() -> tuple[str, str]:
+    """Mint an ingest token, returning ``(token_id, plaintext_token)``.
+
+    The token is ``<id>.<secret>``.  ``id`` is public (used to index the row,
+    printed by ``token list`` and accepted by ``token revoke``); ``secret`` is
+    the random part that is only ever stored *hashed*.  The plaintext is
+    returned exactly once to the caller, who is responsible for handing it to
+    the pushing agent and then discarding it.
+    """
+    token_id = "mdit-" + secrets.token_hex(6)
+    secret = secrets.token_hex(32)
+    return token_id, f"{token_id}.{secret}"
+
+
+def _ingest_token_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_to_dict(row)
+    data.pop("token_hash", None)
+    data["revoked"] = data.get("revoked_at") is not None
+    return data
+
+
 # ---------------------------------------------------------------------------
 # Store
 # ---------------------------------------------------------------------------
@@ -562,6 +608,91 @@ class Store:
         finally:
             conn.close()
         return self.get_task(task_id)
+
+    def insert_task(
+        self,
+        *,
+        title: str,
+        body: str | None = None,
+        origin: models.Origin | str = models.Origin.MANUAL,
+        origin_ref: str | None = None,
+        assignee: str | None = None,
+        coordination: models.Coordination | str = models.Coordination.SINGLE,
+        participants: Iterable[str] | None = None,
+        status: models.Status | str = models.Status.PENDING,
+        created_at: str | None = None,
+        updated_at: str | None = None,
+        last_run_at: str | None = None,
+        result: str | None = None,
+        task_id: str | None = None,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Insert a task with explicit timestamps/result and an optional id.
+
+        Returns ``(task, True)``.  ``task_id`` is used verbatim when supplied
+        and free; if it collides with an existing row a fresh id is generated
+        instead (callers that need idempotency should resolve ``origin +
+        origin_ref`` or the id *before* calling).  Unlike :meth:`add_task`,
+        ``created_at`` / ``updated_at`` / ``last_run_at`` / ``result`` can be
+        preserved from a remote host rather than stamped to "now".
+        """
+        title = _require_text(title, "title")
+        origin_v = models.coerce_enum(origin, models.Origin, "origin")
+        coord_v = models.coerce_enum(coordination, models.Coordination, "coordination")
+        status_v = models.coerce_enum(status, models.Status, "status")
+        parts = _as_list(participants)
+        now = models.normalize_ts(models.now_utc())
+        created = models.normalize_ts(created_at) or now
+        updated = models.normalize_ts(updated_at) or created
+        last_run = models.normalize_ts(last_run_at)
+        body = _empty_to_none(body)
+        origin_ref = _empty_to_none(origin_ref)
+        assignee = _empty_to_none(assignee)
+        result = _empty_to_none(result)
+
+        conn = self.connect()
+        try:
+            candidate = task_id
+            for _ in range(128):
+                if candidate is None:
+                    candidate = models.generate_task_id()
+                try:
+                    conn.execute(
+                        "INSERT INTO tasks (id, title, body, origin, origin_ref, "
+                        "assignee, coordination, participants, status, created_at, "
+                        "updated_at, last_run_at, result) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            candidate,
+                            title,
+                            body,
+                            origin_v,
+                            origin_ref,
+                            assignee,
+                            coord_v,
+                            json.dumps(parts, ensure_ascii=False),
+                            status_v,
+                            created,
+                            updated,
+                            last_run,
+                            result,
+                        ),
+                    )
+                    conn.commit()
+                    row = conn.execute(
+                        "SELECT * FROM tasks WHERE id=?", (candidate,)
+                    ).fetchone()
+                    return _task_from_row(row), True
+                except sqlite3.IntegrityError:
+                    clash = conn.execute(
+                        "SELECT 1 FROM tasks WHERE id=?", (candidate,)
+                    ).fetchone()
+                    if clash:
+                        candidate = None
+                        continue
+                    raise
+            raise RuntimeError("failed to allocate a unique task id after 128 attempts")
+        finally:
+            conn.close()
 
     # -- runs -------------------------------------------------------------
 
@@ -773,17 +904,14 @@ class Store:
         run_id: int | None = None,
     ) -> dict[str, Any]:
         kind = _require_text(kind, "kind")
-        if payload is None:
-            payload = {}
-        elif not isinstance(payload, (dict, list)):
-            raise ValueError("payload must be a JSON-serializable object")
+        payload_json = _serialize_payload(payload)
         now = models.normalize_ts(models.now_utc())
         conn = self.connect()
         try:
             cur = conn.execute(
                 "INSERT INTO events (task_id, run_id, kind, payload, created_at) "
                 "VALUES (?,?,?,?,?)",
-                (task_id, run_id, kind, json.dumps(_redact_payload(payload), ensure_ascii=False), now),
+                (task_id, run_id, kind, payload_json, now),
             )
             ev_id = cur.lastrowid
             conn.execute("UPDATE tasks SET updated_at=? WHERE id=?", (now, task_id))
@@ -810,10 +938,7 @@ class Store:
         Returns ``(event, inserted)``.
         """
         kind = _require_text(kind, "kind")
-        if payload is None:
-            payload = {}
-        elif not isinstance(payload, (dict, list)):
-            raise ValueError("payload must be a JSON-serializable object")
+        payload_json = _serialize_payload(payload)
         ts = models.normalize_ts(created_at) or models.normalize_ts(models.now_utc())
         conn = self.connect()
         try:
@@ -826,7 +951,7 @@ class Store:
                     task_id,
                     run_id,
                     kind,
-                    json.dumps(_redact_payload(payload), ensure_ascii=False),
+                    payload_json,
                     _empty_to_none(source_key),
                     ts,
                 ),
@@ -1126,6 +1251,99 @@ class Store:
             signature,
         )
 
+    # -- ingest tokens ----------------------------------------------------
+
+    def create_ingest_token(self, agent: str) -> tuple[dict[str, Any], str]:
+        """Mint an ingest token bound to ``agent``; return ``(record, plaintext)``.
+
+        Only the plaintext returned here ever exists in the clear; the database
+        stores an scrypt digest of the token's secret part and can never hand
+        the token back.
+        """
+        agent = _require_text(agent, "agent")
+        token_id, plaintext = generate_ingest_token()
+        secret = plaintext.partition(".")[2]
+        now = models.normalize_ts(models.now_utc())
+        conn = self.connect()
+        try:
+            conn.execute(
+                "INSERT INTO ingest_tokens (id, agent, token_hash, created_at) "
+                "VALUES (?,?,?,?)",
+                (token_id, agent, hash_password(secret), now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        record = self.get_ingest_token(token_id)
+        assert record is not None
+        return record, plaintext
+
+    def get_ingest_token(self, token_id: str) -> dict[str, Any] | None:
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM ingest_tokens WHERE id=?", (token_id,)
+            ).fetchone()
+            return _ingest_token_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def list_ingest_tokens(self) -> list[dict[str, Any]]:
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM ingest_tokens ORDER BY created_at ASC, id ASC"
+            ).fetchall()
+            return [_ingest_token_from_row(r) for r in rows]
+        finally:
+            conn.close()
+
+    def revoke_ingest_token(self, token_id: str) -> bool:
+        """Revoke a token; return ``False`` when it does not exist or is gone."""
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT id, revoked_at FROM ingest_tokens WHERE id=?", (token_id,)
+            ).fetchone()
+            if row is None or row["revoked_at"] is not None:
+                return False
+            now = models.normalize_ts(models.now_utc())
+            conn.execute(
+                "UPDATE ingest_tokens SET revoked_at=? WHERE id=?", (now, token_id)
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def verify_ingest_token(self, token: str) -> dict[str, Any] | None:
+        """Resolve a plaintext ingest token to its binding, or ``None``.
+
+        Returns ``{"id", "agent"}`` for a valid, non-revoked token.  The secret
+        part is compared against the stored digest in constant time; nothing is
+        ever read back in the clear.
+        """
+        if not isinstance(token, str) or "." not in token:
+            return None
+        token_id, _, secret = token.partition(".")
+        if not token_id or not secret:
+            return None
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT id, agent, token_hash, revoked_at FROM ingest_tokens "
+                "WHERE id=?",
+                (token_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None or row["revoked_at"] is not None:
+            return None
+        if not verify_password(secret, row["token_hash"]):
+            return None
+        return {"id": row["id"], "agent": row["agent"]}
+
+
 
 __all__ = [
     "ApprovalConflict",
@@ -1136,6 +1354,7 @@ __all__ = [
     "DEFAULT_DB_PATH",
     "Store",
     "generate_approval_id",
+    "generate_ingest_token",
     "get_db_path",
     "sign_decision",
     "verify_decision",

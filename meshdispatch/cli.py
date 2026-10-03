@@ -148,6 +148,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     apdecide.add_argument("--json", action="store_true")
 
+    push = sub.add_parser("push", help="Push the local store to a remote panel")
+    push.add_argument("--to", required=True, dest="url", help="panel /api/ingest URL")
+    push.add_argument("--token", required=True, help="ingest token (bound to --agent)")
+    push.add_argument("--agent", help="agent this host is known as (default: local hostname)")
+    push.add_argument("--since", help="only push tasks created at/after this ISO timestamp")
+    push.add_argument(
+        "--batch-size",
+        dest="batch_size",
+        type=int,
+        default=50,
+        help="tasks per batch (default: 50)",
+    )
+    push.add_argument("--json", action="store_true")
+
+    token = sub.add_parser("token", help="Manage ingest tokens")
+    tokensub = token.add_subparsers(dest="token_command", required=True)
+    tcreate = tokensub.add_parser("create", help="Mint a token bound to an agent")
+    tcreate.add_argument("--agent", required=True, help="agent name the token is bound to")
+    tcreate.add_argument("--json", action="store_true")
+
+    tlist = tokensub.add_parser("list", help="List ingest tokens")
+    tlist.add_argument("--json", action="store_true")
+
+    trevoke = tokensub.add_parser("revoke", help="Revoke an ingest token")
+    trevoke.add_argument("id", help="token id")
+    trevoke.add_argument("--json", action="store_true")
+
     return p
 
 
@@ -315,6 +342,36 @@ def _print_approval_detail(approval: dict[str, Any]) -> None:
     sig = approval.get("decision_signature")
     if sig:
         print(f"  decision_signature: {sig}")
+
+
+def _print_token_table(tokens: list[dict[str, Any]]) -> None:
+    if not tokens:
+        print("(no ingest tokens)")
+        return
+    headers = ["ID", "AGENT", "STATUS", "CREATED_AT", "REVOKED_AT"]
+    rows: list[list[str]] = []
+    for t in tokens:
+        rows.append(
+            [
+                t["id"],
+                t["agent"],
+                "revoked" if t["revoked"] else "active",
+                t["created_at"],
+                t.get("revoked_at") or "-",
+            ]
+        )
+    _print_table(headers, rows)
+
+
+def _print_push_summary(result: dict[str, Any]) -> None:
+    acc = result["accepted"]
+    print(
+        f"accepted {acc['tasks']} tasks, {acc['runs']} runs, "
+        f"{acc['messages']} messages, {acc['events']} events "
+        f"(in {result['batches']} batches)"
+    )
+    for failure in result["failures"]:
+        print(f"error: {failure}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +588,57 @@ def _dispatch(args: argparse.Namespace, store: Store) -> int:
                 )
             return 0
         print(f"error: unknown approval command {args.approval_command}", file=sys.stderr)
+        return 2
+
+    if cmd == "push":
+        from .control.push import push_to
+
+        result = push_to(
+            store,
+            url=args.url,
+            token=args.token,
+            agent=args.agent,
+            since=args.since,
+            batch_size=args.batch_size,
+        )
+        if args.json:
+            _print_json(result)
+        else:
+            _print_push_summary(result)
+        return 1 if result["failures"] else 0
+
+    if cmd == "token":
+        if args.token_command == "create":
+            record, plaintext = store.create_ingest_token(args.agent)
+            if args.json:
+                _print_json(
+                    {
+                        "id": record["id"],
+                        "agent": record["agent"],
+                        "token": plaintext,
+                    }
+                )
+            else:
+                print(f"token {record['id']} created for agent {record['agent']}:")
+                print(plaintext)
+            return 0
+        if args.token_command == "list":
+            tokens = store.list_ingest_tokens()
+            if args.json:
+                _print_json(tokens)
+            else:
+                _print_token_table(tokens)
+            return 0
+        if args.token_command == "revoke":
+            if store.revoke_ingest_token(args.id):
+                if args.json:
+                    _print_json({"id": args.id, "revoked": True})
+                else:
+                    print(f"revoked token {args.id}")
+                return 0
+            print(f"error: no such active token {args.id}", file=sys.stderr)
+            return 1
+        print(f"error: unknown token command {args.token_command}", file=sys.stderr)
         return 2
 
     print(f"error: unknown command {cmd}", file=sys.stderr)
