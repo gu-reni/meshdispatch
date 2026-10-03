@@ -22,11 +22,22 @@ const els = {
   taskDetail: document.getElementById("task-detail"),
   backButton: document.getElementById("detail-back"),
   streamState: document.getElementById("stream-state"),
+  taskForm: document.getElementById("task-form"),
+  taskTitle: document.getElementById("task-title"),
+  taskBody: document.getElementById("task-body"),
+  taskAssignee: document.getElementById("task-assignee"),
+  participantsField: document.getElementById("participants-field"),
+  participantsList: document.getElementById("participants-list"),
+  taskFormResult: document.getElementById("task-form-result"),
+  approvalsList: document.getElementById("approvals-list"),
+  approvalCount: document.getElementById("approval-count"),
 };
 
 const state = {
   tasks: new Map(),
+  agents: new Map(),
   selectedTaskId: null,
+  approvals: new Map(),
 };
 
 // ---------------------------------------------------------------------------
@@ -44,9 +55,37 @@ function api(path) {
   });
 }
 
+async function postTask(payload) {
+  const res = await fetch("/api/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error((data && data.error) || "HTTP " + res.status);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
 function describeError(err) {
   if (err && err.status === 401) return "Authentication required.";
   return "Failed to load (" + (err && err.message ? err.message : "network error") + ").";
+}
+
+function describeApprovalError(err) {
+  if (err && err.status === 403) {
+    return "A valid TOTP code is required for high-risk approvals.";
+  }
+  if (err && err.status === 409) {
+    return "This approval was already decided or has expired.";
+  }
+  if (err && err.status === 404) {
+    return "This approval no longer exists.";
+  }
+  return "Failed to decide (" + (err && err.message ? err.message : "network error") + ").";
 }
 
 function el(tag, className, text) {
@@ -78,6 +117,25 @@ function fmtDuration(startIso, endIso) {
   const end = endIso ? new Date(endIso).getTime() : Date.now();
   if (Number.isNaN(end)) return "—";
   let secs = Math.max(0, Math.round((end - start) / 1000));
+  if (secs < 60) return secs + "s";
+  const mins = Math.floor(secs / 60);
+  secs = secs % 60;
+  if (mins < 60) return mins + "m " + secs + "s";
+  const hours = Math.floor(mins / 60);
+  return hours + "h " + (mins % 60) + "m";
+}
+
+function remainingMs(expiresIso) {
+  if (!expiresIso) return -1;
+  const t = new Date(expiresIso).getTime();
+  if (Number.isNaN(t)) return -1;
+  return t - Date.now();
+}
+
+function fmtRemaining(expiresIso) {
+  const ms = remainingMs(expiresIso);
+  if (ms <= 0) return "expired";
+  let secs = Math.floor(ms / 1000);
   if (secs < 60) return secs + "s";
   const mins = Math.floor(secs / 60);
   secs = secs % 60;
@@ -311,6 +369,257 @@ function renderDetail(detail) {
 }
 
 // ---------------------------------------------------------------------------
+// approvals panel
+// ---------------------------------------------------------------------------
+
+async function decideApproval(id, decision, totp) {
+  const payload = { decision: decision };
+  if (totp) payload.totp = totp;
+  const res = await fetch(
+    "/api/approvals/" + encodeURIComponent(id) + "/decide",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(payload),
+    }
+  );
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error((data && data.error) || "HTTP " + res.status);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+function buildApprovalCard(approval) {
+  const card = el("div", "approval");
+  card.dataset.risk = approval.risk;
+
+  const head = el("div", "approval__head");
+  head.append(
+    badge(approval.risk),
+    el("span", "approval__agent", approval.agent),
+    el("span", "approval__id", approval.id)
+  );
+
+  const meta = el("div", "approval__meta");
+  meta.append(
+    metaItem("task", approval.task_id),
+    metaItem("requested", fmtTime(approval.requested_at)),
+    metaItem("time left", fmtRemaining(approval.expires_at))
+  );
+
+  const command = el("div", "approval__command");
+  command.append(el("span", "approval__command-label", "command"));
+  const commandValue = el("code", "approval__command-value", approval.command);
+  command.append(commandValue);
+
+  card.append(head, meta, command);
+
+  if (approval.purpose) card.append(kvBlock("Purpose", approval.purpose));
+  if (approval.impact) card.append(kvBlock("Impact", approval.impact));
+
+  const highRisk = approval.risk === "high";
+  const expired = remainingMs(approval.expires_at) <= 0;
+
+  let totpInput = null;
+  if (highRisk) {
+    const totpField = el("label", "approval__totp-field");
+    totpField.append(el("span", "approval__totp-label", "TOTP code (required)"));
+    totpInput = document.createElement("input");
+    totpInput.type = "text";
+    totpInput.inputMode = "numeric";
+    totpInput.autocomplete = "one-time-code";
+    totpInput.className = "approval__totp";
+    totpInput.placeholder = "6-digit code";
+    totpField.append(totpInput);
+    card.append(totpField);
+  }
+
+  const actions = el("div", "approval__actions");
+  const approveBtn = el("button", "btn btn--approve", "Approve");
+  approveBtn.type = "button";
+  const rejectBtn = el("button", "btn btn--reject", "Reject");
+  rejectBtn.type = "button";
+  approveBtn.disabled = expired;
+  rejectBtn.disabled = expired;
+  actions.append(approveBtn, rejectBtn);
+
+  const result = el("p", "note approval__result", "");
+  result.hidden = true;
+
+  function handleDecision(decision) {
+    result.hidden = false;
+    result.textContent = "Submitting…";
+    result.classList.remove("note--error", "note--success");
+    decideApproval(approval.id, decision, totpInput ? totpInput.value.trim() : "")
+      .then((updated) => {
+        result.textContent = "Decision recorded: " + updated.status + ".";
+        result.classList.remove("note--error");
+        result.classList.add("note--success");
+        loadApprovals();
+      })
+      .catch((err) => {
+        result.textContent = describeApprovalError(err);
+        result.classList.remove("note--success");
+        result.classList.add("note--error");
+        loadApprovals();
+      });
+  }
+
+  approveBtn.addEventListener("click", () => handleDecision("approve"));
+  rejectBtn.addEventListener("click", () => handleDecision("reject"));
+
+  if (expired) {
+    card.append(el("p", "note note--error", "This request has expired."));
+  }
+
+  card.append(actions, result);
+  return card;
+}
+
+function renderApprovals() {
+  const list = els.approvalsList;
+  list.textContent = "";
+  const pending = Array.from(state.approvals.values()).filter(
+    (a) => a.status === "pending"
+  );
+  els.approvalCount.textContent = String(pending.length);
+
+  if (pending.length === 0) {
+    list.append(emptyNote("No pending approvals."));
+    return;
+  }
+
+  pending
+    .slice()
+    .sort((a, b) => (a.requested_at || "").localeCompare(b.requested_at || ""))
+    .forEach((approval) => list.append(buildApprovalCard(approval)));
+}
+
+async function loadApprovals() {
+  try {
+    const approvals = await api("/api/approvals");
+    state.approvals = new Map(approvals.map((a) => [a.id, a]));
+    renderApprovals();
+  } catch (err) {
+    els.approvalsList.textContent = "";
+    els.approvalCount.textContent = "";
+    els.approvalsList.append(errorNote(err));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// task creation form
+// ---------------------------------------------------------------------------
+
+function agentLabel(agent) {
+  return agent.enabled ? agent.name : agent.name + " (disabled)";
+}
+
+function renderAgentOptions() {
+  const assignee = els.taskAssignee;
+  assignee.textContent = "";
+  const placeholder = el("option", null, "Choose an agent…");
+  placeholder.value = "";
+  assignee.append(placeholder);
+
+  const participants = els.participantsList;
+  participants.textContent = "";
+
+  const agents = Array.from(state.agents.values()).sort((a, b) =>
+    a.name.localeCompare(b.name)
+  );
+  if (agents.length === 0) {
+    participants.append(emptyNote("No agents registered yet."));
+  }
+
+  for (const agent of agents) {
+    const option = el("option", null, agentLabel(agent));
+    option.value = agent.name;
+    assignee.append(option);
+
+    const label = el("label", "participant");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = agent.name;
+    label.append(box, el("span", "participant__name", agentLabel(agent)));
+    participants.append(label);
+  }
+}
+
+async function loadAgents() {
+  try {
+    const agents = await api("/api/agents");
+    state.agents = new Map(agents.map((a) => [a.name, a]));
+    renderAgentOptions();
+  } catch (err) {
+    state.agents = new Map();
+    renderAgentOptions();
+  }
+}
+
+function coordinationMode() {
+  const selected = els.taskForm.querySelector('input[name="coordination"]:checked');
+  return selected ? selected.value : "single";
+}
+
+function selectedParticipants() {
+  const boxes = els.participantsList.querySelectorAll('input[type="checkbox"]');
+  const names = [];
+  for (const box of boxes) {
+    if (box.checked) names.push(box.value);
+  }
+  return names;
+}
+
+function toggleParticipants() {
+  els.participantsField.hidden = coordinationMode() !== "multi";
+}
+
+function showFormResult(message, isError) {
+  const result = els.taskFormResult;
+  result.hidden = false;
+  result.textContent = message;
+  result.classList.toggle("note--error", isError);
+  result.classList.toggle("note--success", !isError);
+}
+
+async function handleFormSubmit(event) {
+  event.preventDefault();
+  const payload = {
+    title: els.taskTitle.value.trim(),
+    body: els.taskBody.value.trim(),
+    assignee: els.taskAssignee.value,
+    coordination: coordinationMode(),
+  };
+  if (payload.coordination === "multi") {
+    payload.participants = selectedParticipants();
+  }
+
+  showFormResult("Dispatching…", false);
+  try {
+    const data = await postTask(payload);
+    const task = data.task;
+    showFormResult(
+      "Created task " + task.id + " (status: " + task.status + ").",
+      false
+    );
+    els.taskForm.reset();
+    els.taskAssignee.value = "";
+    toggleParticipants();
+    await loadTasks();
+    await loadStats();
+  } catch (err) {
+    showFormResult(
+      err && err.message ? err.message : "Failed to dispatch task.",
+      true
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // data loading
 // ---------------------------------------------------------------------------
 
@@ -379,6 +688,7 @@ function scheduleRefresh() {
 async function refresh() {
   await loadStats();
   await loadTasks();
+  await loadApprovals();
   if (state.selectedTaskId) await loadDetail(state.selectedTaskId);
 }
 
@@ -392,7 +702,7 @@ function connectStream() {
 
   source.addEventListener("hello", () => setStreamState("live"));
 
-  for (const table of ["tasks", "runs", "messages", "events"]) {
+  for (const table of ["tasks", "runs", "messages", "events", "approvals"]) {
     source.addEventListener(table, () => scheduleRefresh());
   }
 
@@ -407,9 +717,21 @@ function connectStream() {
 
 function init() {
   els.backButton.addEventListener("click", closeTask);
+  els.taskForm.addEventListener("submit", handleFormSubmit);
+  for (const radio of els.taskForm.querySelectorAll('input[name="coordination"]')) {
+    radio.addEventListener("change", toggleParticipants);
+  }
+  toggleParticipants();
+  loadAgents();
   loadStats();
   loadTasks();
+  loadApprovals();
   connectStream();
+  // Re-render the approvals panel periodically so "time left" stays current
+  // even when nothing else changes (approvals expire on a 30-minute budget).
+  setInterval(() => {
+    if (state.approvals.size > 0) renderApprovals();
+  }, 15000);
 }
 
 init();

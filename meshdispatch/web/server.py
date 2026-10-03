@@ -18,7 +18,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 from urllib.parse import parse_qs, urlsplit
 
-from ..store import Store
+from ..control.dispatch import UnknownAgent, dispatch as dispatch_task
+from ..store import (
+    ApprovalConflict,
+    ApprovalExpired,
+    ApprovalNotFound,
+    Store,
+)
 from .sse import ChangeTracker
 
 if TYPE_CHECKING:
@@ -97,6 +103,18 @@ _DEFAULT_AUTHENTICATOR: Authenticator = (
 )
 
 
+def _deny_totp(principal: str, code: str) -> bool:
+    """Default TOTP verifier: deny (no secret configured)."""
+    del principal, code
+    return False
+
+
+def _noop_audit(*args: Any, **kwargs: Any) -> None:
+    """Default audit sink: discard."""
+    del args, kwargs
+    return None
+
+
 def _build_request(
     headers: Mapping[str, str],
     client_ip: str,
@@ -146,11 +164,22 @@ def _compute_stats(store: Store) -> dict[str, dict[str, int]]:
 def create_app(
     store: Store,
     authenticator: Authenticator | None = None,
+    totp_verifier: Callable[[str, str], bool] | None = None,
+    audit: Callable[..., Any] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
-    """Build a request-handler class bound to ``store`` and ``authenticator``."""
+    """Build a request-handler class bound to ``store`` and ``authenticator``.
+
+    ``totp_verifier`` verifies a TOTP code for the authenticated principal (used
+    for high-risk approvals; defaults to deny).  ``audit`` receives approval
+    audit events as ``audit(event, *, principal, approval_id, decision, ip)``.
+    """
     auth: Authenticator = (
         authenticator if authenticator is not None else _DEFAULT_AUTHENTICATOR
     )
+    totp_check: Callable[[str, str], bool] = (
+        totp_verifier if totp_verifier is not None else _deny_totp
+    )
+    audit_hook: Callable[..., Any] = audit if audit is not None else _noop_audit
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -162,7 +191,34 @@ def create_app(
         def do_HEAD(self) -> None:
             self._dispatch()
 
+        def do_POST(self) -> None:
+            self._dispatch_post()
+
         # -- routing -----------------------------------------------------
+
+        def _authorize(self, request: Request) -> "Identity | None":
+            """Run the request through auth; send a response on failure.
+
+            Returns the authenticated :class:`Identity` (or ``None`` once a
+            501/401 response has already been written).
+            """
+            if request.path in PUBLIC_PATHS:
+                self.close_connection = True
+                self._send_json(
+                    HTTPStatus.NOT_IMPLEMENTED,
+                    {"error": "login/bootstrap is handled by the auth layer"},
+                )
+                return None
+            identity = auth(request)
+            if identity is None:
+                self.close_connection = True
+                self._send_json(
+                    HTTPStatus.UNAUTHORIZED,
+                    {"error": "authentication required"},
+                    headers={"WWW-Authenticate": 'Bearer realm="meshdispatch"'},
+                )
+                return None
+            return identity
 
         def _dispatch(self) -> None:
             request = _build_request(
@@ -170,25 +226,19 @@ def create_app(
                 self.client_address[0],
                 self.path,
             )
-            if request.path in PUBLIC_PATHS:
-                self._send_json(
-                    HTTPStatus.NOT_IMPLEMENTED,
-                    {"error": "login/bootstrap is handled by the auth layer"},
-                )
-                return
-
-            if auth(request) is None:
-                self._send_json(
-                    HTTPStatus.UNAUTHORIZED,
-                    {"error": "authentication required"},
-                    headers={"WWW-Authenticate": 'Bearer realm="meshdispatch"'},
-                )
+            if self._authorize(request) is None:
                 return
 
             if request.path == "/api/tasks":
                 self._handle_task_list(request)
             elif request.path.startswith("/api/tasks/"):
                 self._handle_task_detail(request)
+            elif request.path == "/api/agents":
+                self._handle_agent_list()
+            elif request.path == "/api/approvals":
+                self._handle_approval_list(request)
+            elif request.path.startswith("/api/approvals/"):
+                self._handle_approval_detail(request)
             elif request.path == "/api/stats":
                 self._handle_stats()
             elif request.path == "/api/stream":
@@ -200,7 +250,215 @@ def create_app(
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
+        def _dispatch_post(self) -> None:
+            request = _build_request(
+                self.headers,
+                self.client_address[0],
+                self.path,
+            )
+            identity = self._authorize(request)
+            if identity is None:
+                return
+
+            if request.path == "/api/tasks":
+                self._handle_task_create(request)
+            elif request.path == "/api/approvals":
+                self._handle_approval_create(request, identity)
+            elif request.path.startswith("/api/approvals/") and request.path.endswith(
+                "/decide"
+            ):
+                self._handle_approval_decide(request, identity)
+            else:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
         # -- endpoints ---------------------------------------------------
+
+        def _read_body(self) -> str:
+            length = self.headers.get("Content-Length")
+            if not length:
+                return ""
+            try:
+                size = int(length)
+            except ValueError:
+                return ""
+            if size <= 0:
+                return ""
+            return self.rfile.read(size).decode("utf-8", errors="replace")
+
+        def _handle_agent_list(self) -> None:
+            self._send_json(HTTPStatus.OK, store.list_agents())
+
+        def _audit(
+            self,
+            event: str,
+            *,
+            principal: str | None = None,
+            approval_id: str | None = None,
+            decision: str | None = None,
+            ip: str | None = None,
+        ) -> None:
+            audit_hook(
+                event,
+                principal=principal,
+                approval_id=approval_id,
+                decision=decision,
+                ip=ip,
+            )
+
+        def _handle_approval_list(self, request: Request) -> None:
+            status = request.query.get("status") or None
+            try:
+                approvals = store.list_approvals(status=status)
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send_json(HTTPStatus.OK, approvals)
+
+        def _handle_approval_detail(self, request: Request) -> None:
+            approval_id = request.path[len("/api/approvals/") :]
+            if not approval_id or "/" in approval_id:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                return
+            approval = store.get_approval(approval_id)
+            if approval is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "no such approval"})
+                return
+            self._send_json(HTTPStatus.OK, approval)
+
+        def _handle_approval_create(self, request: Request, identity: Any) -> None:
+            raw = self._read_body()
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid JSON body"})
+                return
+            if not isinstance(data, dict):
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST, {"error": "JSON body must be an object"}
+                )
+                return
+            try:
+                approval = store.create_approval(
+                    task_id=data.get("task_id"),
+                    agent=data.get("agent"),
+                    command=data.get("command"),
+                    purpose=data.get("purpose"),
+                    impact=data.get("impact"),
+                    risk=data.get("risk", "low"),
+                )
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._audit(
+                "approval_create",
+                principal=identity.principal,
+                approval_id=approval["id"],
+                ip=request.client_ip,
+            )
+            self._send_json(HTTPStatus.CREATED, approval)
+
+        def _handle_approval_decide(self, request: Request, identity: Any) -> None:
+            approval_id = request.path[len("/api/approvals/") : -len("/decide")]
+            if not approval_id or "/" in approval_id:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                return
+            raw = self._read_body()
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid JSON body"})
+                return
+            if not isinstance(data, dict):
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST, {"error": "JSON body must be an object"}
+                )
+                return
+            decision = data.get("decision")
+            if decision == "approve":
+                decision_v = "approved"
+            elif decision == "reject":
+                decision_v = "rejected"
+            else:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "decision must be 'approve' or 'reject'"},
+                )
+                return
+
+            approval = store.get_approval(approval_id)
+            if approval is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "no such approval"})
+                return
+
+            if approval["status"] != "pending":
+                self._send_json(
+                    HTTPStatus.CONFLICT,
+                    {
+                        "error": f"approval {approval_id} is already "
+                        f"{approval['status']}"
+                    },
+                )
+                return
+
+            if approval["risk"] == "high" and not totp_check(
+                identity.principal, data.get("totp") or ""
+            ):
+                self._send_json(
+                    HTTPStatus.FORBIDDEN,
+                    {"error": "a valid TOTP code is required for high-risk approvals"},
+                )
+                return
+
+            try:
+                updated = store.decide_approval(
+                    approval_id, decision=decision_v, decided_by=identity.principal
+                )
+            except ApprovalNotFound:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "no such approval"})
+                return
+            except (ApprovalConflict, ApprovalExpired) as exc:
+                self._send_json(HTTPStatus.CONFLICT, {"error": str(exc)})
+                return
+
+            self._audit(
+                "approval_decide",
+                principal=identity.principal,
+                approval_id=approval_id,
+                decision=decision_v,
+                ip=request.client_ip,
+            )
+            self._send_json(HTTPStatus.OK, updated)
+
+        def _handle_task_create(self, request: Request) -> None:
+            del request
+            raw = self._read_body()
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid JSON body"})
+                return
+            if not isinstance(data, dict):
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST, {"error": "JSON body must be an object"}
+                )
+                return
+            try:
+                result = dispatch_task(
+                    store,
+                    title=data.get("title"),
+                    body=data.get("body"),
+                    assignee=data.get("assignee"),
+                    coordination=data.get("coordination", "single"),
+                    participants=data.get("participants"),
+                    send=bool(data.get("dispatch", True)),
+                )
+            except UnknownAgent as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send_json(HTTPStatus.CREATED, result)
 
         def _handle_task_list(self, request: Request) -> None:
             status = request.query.get("status")
@@ -315,15 +573,20 @@ def create_server(
     port: int = 0,
     store: Store | None = None,
     authenticator: Authenticator | None = None,
+    totp_verifier: Callable[[str, str], bool] | None = None,
+    audit: Callable[..., Any] | None = None,
 ) -> ThreadingHTTPServer:
     """Create a threaded HTTP server serving ``store`` over JSON + SSE.
 
     ``port=0`` selects an ephemeral port (read ``server.server_address``).
     ``authenticator`` overrides the default (the real auth module when present,
-    otherwise deny-all); tests inject a stub here.
+    otherwise deny-all); tests inject a stub here.  ``totp_verifier`` and
+    ``audit`` wire the high-risk second factor and the approval audit log.
     """
     store = store if store is not None else Store()
-    handler = create_app(store, authenticator)
+    handler = create_app(
+        store, authenticator, totp_verifier=totp_verifier, audit=audit
+    )
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
     return server

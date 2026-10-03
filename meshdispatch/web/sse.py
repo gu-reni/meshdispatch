@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from typing import Any
 
-#: Tables watched for change detection.  ``tasks`` uses a TEXT primary key but
-#: still carries an implicit ``rowid``, so ``MAX(rowid)`` is a uniform marker
-#: across all four tables.
-_TABLES = ("tasks", "runs", "messages", "events")
+#: Tables watched for change detection.  ``tasks`` and ``approvals`` use a TEXT
+#: primary key but still carry an implicit ``rowid``, so ``MAX(rowid)`` is a
+#: uniform marker across every table.
+_TABLES = ("tasks", "runs", "messages", "events", "approvals")
 
 
 class ChangeTracker:

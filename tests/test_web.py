@@ -79,6 +79,18 @@ def _get_raw(port: int, path: str):
     return resp.status, content_type, body
 
 
+def _post(port: int, path: str, payload: Any):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    body = json.dumps(payload)
+    conn.request(
+        "POST", path, body=body, headers={"Content-Type": "application/json"}
+    )
+    resp = conn.getresponse()
+    raw = resp.read().decode("utf-8")
+    conn.close()
+    return resp.status, json.loads(raw) if raw else None
+
+
 # ---------------------------------------------------------------------------
 # 1. auth gate
 # ---------------------------------------------------------------------------
@@ -318,3 +330,101 @@ def test_static_path_traversal_blocked(make_server):
     _, port = make_server()
     status, _, _ = _get_raw(port, "/static/../store.py")
     assert status == 404
+
+
+# ---------------------------------------------------------------------------
+# 8. agent registry API
+# ---------------------------------------------------------------------------
+
+
+def test_agents_endpoint_lists_registered(make_server, store):
+    store.add_agent(name="alpha", endpoint="http://a", transport="a2a")
+    store.add_agent(name="beta", endpoint="http://b", transport="a2a", enabled=False)
+
+    _, port = make_server()
+    status, body = _get(port, "/api/agents")
+    assert status == 200
+    assert len(body) == 2
+    by_name = {a["name"]: a for a in body}
+    assert by_name["alpha"]["endpoint"] == "http://a"
+    assert by_name["alpha"]["enabled"] is True
+    assert by_name["beta"]["enabled"] is False
+
+
+def test_agents_endpoint_requires_auth(make_server):
+    _, port = make_server(auth=_deny)
+    status, _ = _get(port, "/api/agents")
+    assert status == 401
+
+
+# ---------------------------------------------------------------------------
+# 9. task dispatch API
+# ---------------------------------------------------------------------------
+
+
+def test_post_task_registers_only(make_server, store):
+    store.add_agent(name="worker", endpoint="http://worker")
+    _, port = make_server()
+
+    status, body = _post(
+        port,
+        "/api/tasks",
+        {
+            "title": "deploy",
+            "body": "ship it",
+            "assignee": "worker",
+            "coordination": "single",
+            "dispatch": False,
+        },
+    )
+    assert status == 201
+    assert body["dispatched"] is False
+    assert body["task"]["origin"] == "manual"
+    assert body["task"]["assignee"] == "worker"
+    assert body["task"]["status"] == "pending"
+
+    _, tasks = _get(port, "/api/tasks")
+    assert any(t["id"] == body["task"]["id"] for t in tasks)
+
+
+def test_post_task_unknown_assignee_returns_400(make_server, store):
+    _, port = make_server()
+    status, body = _post(
+        port,
+        "/api/tasks",
+        {"title": "t", "assignee": "ghost"},
+    )
+    assert status == 400
+    assert "ghost" in body["error"]
+
+
+def test_post_task_requires_auth(make_server, store):
+    store.add_agent(name="worker", endpoint="http://worker")
+    _, port = make_server(auth=_deny)
+    status, _ = _post(
+        port, "/api/tasks", {"title": "t", "assignee": "worker"}
+    )
+    assert status == 401
+
+
+def test_post_task_transport_failure_surfaces_as_failed_task(make_server, store):
+    # Point at a closed port so the default A2A transport fails fast; the
+    # request must still succeed (201) with the task recorded as failed rather
+    # than an exception escaping to a 500.
+    store.add_agent(name="worker", endpoint="http://127.0.0.1:1")
+    _, port = make_server()
+
+    status, body = _post(
+        port,
+        "/api/tasks",
+        {"title": "deploy", "assignee": "worker"},
+    )
+    assert status == 201
+    assert body["dispatched"] is True
+    assert body["task"]["status"] == "failed"
+
+    detail = store.get_task_detail(body["task"]["id"])
+    assert len(detail["runs"]) == 1
+    assert detail["runs"][0]["status"] == "failed"
+    assert len(detail["events"]) == 1
+    assert detail["events"][0]["kind"] == "dispatch_failed"

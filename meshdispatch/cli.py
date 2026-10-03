@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from typing import Any, Sequence
 
 from . import models
 from .registry import Registry
-from .store import Store
+from .store import ApprovalConflict, ApprovalExpired, Store
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -105,6 +106,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sync.add_argument("--since", help="only sync records at/after this ISO timestamp")
     sync.add_argument("--json", action="store_true")
+
+    agent = sub.add_parser("agent", help="Manage the agent registry")
+    agentsub = agent.add_subparsers(dest="agent_command", required=True)
+    aadd = agentsub.add_parser("add", help="Register an agent")
+    aadd.add_argument("--name", required=True, help="agent name (required)")
+    aadd.add_argument("--description")
+    aadd.add_argument("--endpoint", help="A2A endpoint URL")
+    aadd.add_argument("--transport", default="a2a", help="transport (default: a2a)")
+    aadd.add_argument("--disable", action="store_true", help="register as disabled")
+    aadd.add_argument("--json", action="store_true")
+
+    alist = agentsub.add_parser("list", help="List registered agents")
+    alist.add_argument("--json", action="store_true")
+
+    ashow = agentsub.add_parser("show", help="Show one registered agent")
+    ashow.add_argument("name")
+    ashow.add_argument("--json", action="store_true")
+
+    approval = sub.add_parser("approval", help="Manage the approvals queue")
+    approval_sub = approval.add_subparsers(dest="approval_command", required=True)
+    aplist = approval_sub.add_parser("list", help="List approval requests")
+    aplist.add_argument("--json", action="store_true")
+
+    apshow = approval_sub.add_parser("show", help="Show one approval request")
+    apshow.add_argument("id")
+    apshow.add_argument("--json", action="store_true")
+
+    apdecide = approval_sub.add_parser(
+        "decide", help="Approve or reject an approval request"
+    )
+    apdecide.add_argument("id")
+    decision_group = apdecide.add_mutually_exclusive_group(required=True)
+    decision_group.add_argument("--approve", action="store_true")
+    decision_group.add_argument("--reject", action="store_true")
+    apdecide.add_argument("--totp", help="TOTP code (required for high-risk)")
+    apdecide.add_argument(
+        "--principal",
+        help="name recorded as the decision maker "
+        "(default: $MESHDISPATCH_PRINCIPAL or $USER)",
+    )
+    apdecide.add_argument("--json", action="store_true")
 
     return p
 
@@ -203,6 +245,76 @@ def _print_detail(detail: dict[str, Any]) -> None:
             f"  #{e['id']} {e['kind']} [{e['created_at']}]: "
             f"{json.dumps(e['payload'], ensure_ascii=False)}"
         )
+
+
+def _print_agent_table(agents: list[dict[str, Any]]) -> None:
+    if not agents:
+        print("(no agents)")
+        return
+    headers = ["NAME", "DESCRIPTION", "ENDPOINT", "TRANSPORT", "ENABLED", "CREATED_AT"]
+    rows: list[list[str]] = []
+    for a in agents:
+        desc = a.get("description") or ""
+        desc = desc if len(desc) <= 30 else desc[:29] + "…"
+        rows.append(
+            [
+                a["name"],
+                desc or "-",
+                a.get("endpoint") or "-",
+                a["transport"],
+                "yes" if a["enabled"] else "no",
+                a["created_at"],
+            ]
+        )
+    _print_table(headers, rows)
+
+
+def _print_agent_detail(agent: dict[str, Any]) -> None:
+    print(f"Agent: {agent['name']}")
+    for key in ("description", "endpoint", "transport"):
+        val = agent.get(key)
+        print(f"  {key}: {val or '-'}")
+    print(f"  enabled: {'yes' if agent['enabled'] else 'no'}")
+    for key in ("created_at", "updated_at"):
+        print(f"  {key}: {agent.get(key) or '-'}")
+
+
+def _print_approval_table(approvals: list[dict[str, Any]]) -> None:
+    if not approvals:
+        print("(no approvals)")
+        return
+    headers = ["ID", "STATUS", "RISK", "AGENT", "TASK_ID", "COMMAND", "REQUESTED_AT"]
+    rows: list[list[str]] = []
+    for a in approvals:
+        command = a["command"]
+        command = command if len(command) <= 40 else command[:39] + "…"
+        rows.append(
+            [
+                a["id"],
+                a["status"],
+                a["risk"],
+                a["agent"],
+                a["task_id"],
+                command,
+                a["requested_at"],
+            ]
+        )
+    _print_table(headers, rows)
+
+
+def _print_approval_detail(approval: dict[str, Any]) -> None:
+    print(f"Approval: {approval['id']}")
+    for key in ("status", "risk", "agent", "task_id", "nonce"):
+        print(f"  {key}: {approval[key]}")
+    print(f"  command: {approval['command']}")
+    for key in ("purpose", "impact"):
+        val = approval.get(key)
+        print(f"  {key}: {val or '-'}")
+    for key in ("requested_at", "expires_at", "decided_at", "decided_by"):
+        print(f"  {key}: {approval.get(key) or '-'}")
+    sig = approval.get("decision_signature")
+    if sig:
+        print(f"  decision_signature: {sig}")
 
 
 # ---------------------------------------------------------------------------
@@ -330,8 +442,107 @@ def _dispatch(args: argparse.Namespace, store: Store) -> int:
                 )
         return 0
 
+    if cmd == "agent":
+        if args.agent_command == "add":
+            agent = store.add_agent(
+                name=args.name,
+                description=args.description,
+                endpoint=args.endpoint,
+                transport=args.transport,
+                enabled=not args.disable,
+            )
+            if args.json:
+                _print_json(agent)
+            else:
+                state = "enabled" if agent["enabled"] else "disabled"
+                print(
+                    f"agent {agent['name']} registered ({agent['transport']}/{state})"
+                )
+            return 0
+        if args.agent_command == "list":
+            agents = store.list_agents()
+            if args.json:
+                _print_json(agents)
+            else:
+                _print_agent_table(agents)
+            return 0
+        if args.agent_command == "show":
+            agent = store.get_agent(args.name)
+            if agent is None:
+                print(f"error: no agent named {args.name}", file=sys.stderr)
+                return 1
+            if args.json:
+                _print_json(agent)
+            else:
+                _print_agent_detail(agent)
+            return 0
+        print(f"error: unknown agent command {args.agent_command}", file=sys.stderr)
+        return 2
+
+    if cmd == "approval":
+        if args.approval_command == "list":
+            approvals = store.list_approvals()
+            if args.json:
+                _print_json(approvals)
+            else:
+                _print_approval_table(approvals)
+            return 0
+        if args.approval_command == "show":
+            approval = store.get_approval(args.id)
+            if approval is None:
+                print(f"error: no approval with id {args.id}", file=sys.stderr)
+                return 1
+            if args.json:
+                _print_json(approval)
+            else:
+                _print_approval_detail(approval)
+            return 0
+        if args.approval_command == "decide":
+            approval = store.get_approval(args.id)
+            if approval is None:
+                print(f"error: no approval with id {args.id}", file=sys.stderr)
+                return 1
+            decision = "approved" if args.approve else "rejected"
+            if approval["risk"] == "high":
+                secret = os.environ.get("MESHDISPATCH_TOTP_SECRET")
+                if not secret or not _cli_totp_ok(secret, args.totp):
+                    print(
+                        "error: high-risk approval requires a valid --totp code "
+                        "(set MESHDISPATCH_TOTP_SECRET to verify it)",
+                        file=sys.stderr,
+                    )
+                    return 1
+            principal = args.principal or os.environ.get(
+                "MESHDISPATCH_PRINCIPAL"
+            ) or os.environ.get("USER") or "owner"
+            try:
+                updated = store.decide_approval(
+                    args.id, decision=decision, decided_by=principal
+                )
+            except (ApprovalConflict, ApprovalExpired) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            if args.json:
+                _print_json(updated)
+            else:
+                print(
+                    f"approval {updated['id']} -> {updated['status']} "
+                    f"(by {updated['decided_by']})"
+                )
+            return 0
+        print(f"error: unknown approval command {args.approval_command}", file=sys.stderr)
+        return 2
+
     print(f"error: unknown command {cmd}", file=sys.stderr)
     return 2
+
+
+def _cli_totp_ok(secret: str, code: str | None) -> bool:
+    if not code:
+        return False
+    from .auth.totp import totp_verify
+
+    return totp_verify(secret, code)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

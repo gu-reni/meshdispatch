@@ -16,8 +16,56 @@
   </header>
 
   <main class="layout">
+    <section class="pane pane--approvals" id="approvals-pane" aria-labelledby="approvals-heading">
+      <h2 class="pane__heading" id="approvals-heading">Pending approvals <span class="task-list__count" id="approval-count"></span></h2>
+      <div class="approvals" id="approvals-list"></div>
+    </section>
+
     <section class="pane pane--list" id="task-list-pane" aria-labelledby="task-list-heading">
       <h2 class="pane__heading" id="task-list-heading">Tasks <span class="task-list__count" id="task-count"></span></h2>
+
+      <form class="task-form" id="task-form" autocomplete="off">
+        <label class="field">
+          <span class="field__label">Title</span>
+          <input class="field__control" type="text" id="task-title" name="title" required>
+        </label>
+
+        <label class="field">
+          <span class="field__label">Description</span>
+          <textarea class="field__control" id="task-body" name="body" rows="3"></textarea>
+        </label>
+
+        <label class="field">
+          <span class="field__label">Assignee</span>
+          <select class="field__control" id="task-assignee" name="assignee" required></select>
+        </label>
+
+        <fieldset class="field">
+          <legend class="field__label">Coordination</legend>
+          <div class="field__choice-row">
+            <label class="choice">
+              <input type="radio" name="coordination" value="single" checked>
+              <span>Single-agent</span>
+            </label>
+            <label class="choice">
+              <input type="radio" name="coordination" value="multi">
+              <span>Multi-agent</span>
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset class="field" id="participants-field" hidden>
+          <legend class="field__label">Participants</legend>
+          <div class="participants" id="participants-list"></div>
+        </fieldset>
+
+        <div class="task-form__actions">
+          <button class="btn" type="submit">Create task</button>
+        </div>
+
+        <p class="note task-form__result" id="task-form-result" hidden></p>
+      </form>
+
       <div class="task-list" id="task-list"></div>
     </section>
 

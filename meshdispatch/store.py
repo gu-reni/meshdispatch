@@ -8,9 +8,12 @@ idempotently on open.
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
+import secrets
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -18,6 +21,13 @@ from . import models
 from .redact import redact
 
 DEFAULT_DB_PATH = "meshdispatch.db"
+
+#: Default lifetime of an approval request before it can no longer be decided.
+DEFAULT_APPROVAL_TTL_SECONDS = 30 * 60
+
+_APPROVAL_RISKS = ("low", "medium", "high")
+_APPROVAL_STATUSES = ("pending", "approved", "rejected", "expired")
+_APPROVAL_DECISIONS = ("approved", "rejected")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -71,11 +81,40 @@ CREATE TABLE IF NOT EXISTS events (
     created_at  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS agents (
+    name        TEXT PRIMARY KEY,
+    description TEXT,
+    endpoint    TEXT,
+    transport   TEXT NOT NULL,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS approvals (
+    id                  TEXT PRIMARY KEY,
+    task_id             TEXT NOT NULL,
+    agent               TEXT NOT NULL,
+    command             TEXT NOT NULL,
+    purpose             TEXT,
+    impact              TEXT,
+    risk                TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    nonce               TEXT NOT NULL,
+    requested_at        TEXT NOT NULL,
+    expires_at          TEXT NOT NULL,
+    decided_at          TEXT,
+    decided_by          TEXT,
+    decision_signature  TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_runs_task_id ON runs(task_id);
 CREATE INDEX IF NOT EXISTS idx_messages_task_id ON messages(task_id);
 CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id);
+CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
+CREATE INDEX IF NOT EXISTS idx_approvals_requested_at ON approvals(requested_at);
 """
 
 # Columns added since the phase-1 schema.  ``connect`` runs these as idempotent
@@ -146,6 +185,16 @@ def _event_from_row(row: sqlite3.Row) -> dict[str, Any]:
     return data
 
 
+def _agent_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_to_dict(row)
+    data["enabled"] = bool(data.get("enabled"))
+    return data
+
+
+def _approval_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return _row_to_dict(row)
+
+
 def _empty_to_none(value: str | None) -> str | None:
     if isinstance(value, str):
         value = value.strip()
@@ -166,6 +215,122 @@ def _require_visibility(value: str) -> str:
             f"visibility must be one of {', '.join(_VISIBILITY_VALUES)}; got {value!r}"
         )
     return value
+
+
+# ---------------------------------------------------------------------------
+# Approval helpers
+# ---------------------------------------------------------------------------
+
+
+class ApprovalError(Exception):
+    """Base class for approval workflow errors."""
+
+
+class ApprovalNotFound(ApprovalError):
+    """The requested approval id does not exist."""
+
+    def __init__(self, approval_id: str) -> None:
+        self.approval_id = approval_id
+        super().__init__(f"no such approval: {approval_id}")
+
+
+class ApprovalConflict(ApprovalError):
+    """The approval has already been decided (or consumed) and cannot be."""
+
+    def __init__(self, approval_id: str, status: str) -> None:
+        self.approval_id = approval_id
+        self.status = status
+        super().__init__(f"approval {approval_id} is already {status}")
+
+
+class ApprovalExpired(ApprovalError):
+    """The approval is past its expiry and can no longer be decided."""
+
+    def __init__(self, approval_id: str) -> None:
+        self.approval_id = approval_id
+        super().__init__(f"approval {approval_id} has expired")
+
+
+def generate_approval_id(now: datetime | None = None) -> str:
+    """Build an approval id of the form ``ap-<YYYYMMDD>-<6hex>``.
+
+    Mirrors :func:`models.generate_task_id`; callers retry on the (astronomically
+    unlikely) primary-key collision.
+    """
+    day = (now or models.now_utc()).strftime("%Y%m%d")
+    suffix = secrets.token_hex(3)  # 6 lowercase hex chars
+    return f"ap-{day}-{suffix}"
+
+
+def _require_approval_risk(value: str) -> str:
+    if value not in _APPROVAL_RISKS:
+        raise ValueError(
+            f"risk must be one of {', '.join(_APPROVAL_RISKS)}; got {value!r}"
+        )
+    return value
+
+
+def _require_approval_status(value: str) -> str:
+    if value not in _APPROVAL_STATUSES:
+        raise ValueError(
+            f"status must be one of {', '.join(_APPROVAL_STATUSES)}; got {value!r}"
+        )
+    return value
+
+
+def _require_approval_decision(value: str) -> str:
+    if value == "approve":
+        value = "approved"
+    elif value == "reject":
+        value = "rejected"
+    if value not in _APPROVAL_DECISIONS:
+        raise ValueError(
+            f"decision must be one of approved, rejected; got {value!r}"
+        )
+    return value
+
+
+def _parse_ts(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _add_seconds(value: str, seconds: float) -> str:
+    dt = _parse_ts(value) + timedelta(seconds=seconds)
+    return models.normalize_ts(dt)
+
+
+def sign_decision(
+    key: str,
+    approval_id: str,
+    task_id: str,
+    decision: str,
+    decided_by: str,
+    decided_at: str,
+) -> str:
+    """Return the HMAC-SHA256 signature binding a decision to its fields.
+
+    The signature covers ``approval_id``, ``task_id``, ``decision``,
+    ``decided_by`` and ``decided_at`` so a recorded decision cannot be replayed
+    against a different approval, task, actor or time.
+    """
+    payload = "\n".join(
+        [str(approval_id), str(task_id), str(decision), str(decided_by), str(decided_at)]
+    )
+    return hmac.new(key.encode("utf-8"), payload.encode("utf-8"), "sha256").hexdigest()
+
+
+def verify_decision(
+    key: str,
+    approval_id: str,
+    task_id: str,
+    decision: str,
+    decided_by: str,
+    decided_at: str,
+    signature: str | None,
+) -> bool:
+    """Constant-time check that ``signature`` matches the bound decision."""
+    expected = sign_decision(key, approval_id, task_id, decision, decided_by, decided_at)
+    return hmac.compare_digest(expected, signature or "")
 
 
 def _as_list(value: Iterable[str] | str | None) -> list[str]:
@@ -201,9 +366,19 @@ def _redact_payload(payload: Any) -> Any:
 class Store:
     """Thin, typed facade over the meshdispatch SQLite schema."""
 
-    def __init__(self, db_path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        *,
+        approval_signing_key: str | None = None,
+    ) -> None:
         self.db_path = Path(db_path) if db_path is not None else get_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.approval_signing_key = (
+            approval_signing_key
+            or os.environ.get("MESHDISPATCH_APPROVAL_SIGNING_KEY")
+            or secrets.token_hex(32)
+        )
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -703,5 +878,265 @@ class Store:
         finally:
             conn.close()
 
+    # -- agents -----------------------------------------------------------
 
-__all__ = ["DEFAULT_DB_PATH", "Store", "get_db_path"]
+    def add_agent(
+        self,
+        *,
+        name: str,
+        description: str | None = None,
+        endpoint: str | None = None,
+        transport: str = "a2a",
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Insert or update an agent, keyed idempotently by ``name``.
+
+        Re-registering an existing name overwrites its description, endpoint,
+        transport and enabled flag (``created_at`` is preserved) and never
+        creates a second row.
+        """
+        name = _require_text(name, "name")
+        transport = _require_text(transport, "transport")
+        now = models.normalize_ts(models.now_utc())
+        conn = self.connect()
+        try:
+            conn.execute(
+                "INSERT INTO agents (name, description, endpoint, transport, "
+                "enabled, created_at, updated_at) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET "
+                "description=excluded.description, endpoint=excluded.endpoint, "
+                "transport=excluded.transport, enabled=excluded.enabled, "
+                "updated_at=excluded.updated_at",
+                (
+                    name,
+                    _empty_to_none(description),
+                    _empty_to_none(endpoint),
+                    transport,
+                    1 if enabled else 0,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
+            return _agent_from_row(row)
+        finally:
+            conn.close()
+
+    def get_agent(self, name: str) -> dict[str, Any] | None:
+        conn = self.connect()
+        try:
+            row = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
+            return _agent_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def list_agents(self) -> list[dict[str, Any]]:
+        conn = self.connect()
+        try:
+            rows = conn.execute("SELECT * FROM agents ORDER BY name ASC").fetchall()
+            return [_agent_from_row(r) for r in rows]
+        finally:
+            conn.close()
+
+    # -- approvals --------------------------------------------------------
+
+    def create_approval(
+        self,
+        *,
+        task_id: str,
+        agent: str,
+        command: str,
+        purpose: str | None = None,
+        impact: str | None = None,
+        risk: str = "low",
+        nonce: str | None = None,
+        ttl_seconds: int = DEFAULT_APPROVAL_TTL_SECONDS,
+        requested_at: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Record a new approval request and return it.
+
+        Returns a row with ``status == "pending"`` and a fresh ``nonce``.  The
+        approval is independent of the tasks table (``task_id`` is recorded but
+        not foreign-keyed) so a request can be raised for an operation that has
+        no task row yet.
+        """
+        task_id = _require_text(task_id, "task_id")
+        agent = _require_text(agent, "agent")
+        command = _require_text(command, "command")
+        risk = _require_approval_risk(risk)
+        purpose = _empty_to_none(purpose)
+        impact = _empty_to_none(impact)
+        nonce = nonce or secrets.token_hex(16)
+        requested = models.normalize_ts(requested_at or models.now_utc())
+        expires = (
+            models.normalize_ts(expires_at)
+            if expires_at is not None
+            else _add_seconds(requested, ttl_seconds)
+        )
+        conn = self.connect()
+        try:
+            for _ in range(128):
+                approval_id = generate_approval_id()
+                try:
+                    conn.execute(
+                        "INSERT INTO approvals (id, task_id, agent, command, "
+                        "purpose, impact, risk, status, nonce, requested_at, "
+                        "expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            approval_id,
+                            task_id,
+                            agent,
+                            command,
+                            purpose,
+                            impact,
+                            risk,
+                            "pending",
+                            nonce,
+                            requested,
+                            expires,
+                        ),
+                    )
+                    conn.commit()
+                    return self._get_approval(conn, approval_id)
+                except sqlite3.IntegrityError:
+                    clash = conn.execute(
+                        "SELECT 1 FROM approvals WHERE id=?", (approval_id,)
+                    ).fetchone()
+                    if clash:
+                        continue
+                    raise
+            raise RuntimeError("failed to allocate a unique approval id after 128 attempts")
+        finally:
+            conn.close()
+
+    def get_approval(self, approval_id: str) -> dict[str, Any] | None:
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM approvals WHERE id=?", (approval_id,)
+            ).fetchone()
+            return _approval_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def _get_approval(
+        self, conn: sqlite3.Connection, approval_id: str
+    ) -> dict[str, Any]:
+        row = conn.execute(
+            "SELECT * FROM approvals WHERE id=?", (approval_id,)
+        ).fetchone()
+        return _approval_from_row(row)
+
+    def list_approvals(self, status: str | None = None) -> list[dict[str, Any]]:
+        """List approvals, pending first, then most recently requested."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status is not None:
+            clauses.append("status=?")
+            params.append(_require_approval_status(status))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM approvals{where} "
+                "ORDER BY CASE WHEN status='pending' THEN 0 ELSE 1 END ASC, "
+                "requested_at DESC, rowid DESC",
+                params,
+            ).fetchall()
+            return [_approval_from_row(r) for r in rows]
+        finally:
+            conn.close()
+
+    def decide_approval(
+        self,
+        approval_id: str,
+        *,
+        decision: str,
+        decided_by: str,
+        decided_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Record a decision against a pending approval.
+
+        Enforces the hard safety boundaries in-process:
+
+        * single use -- a non-pending entry raises :class:`ApprovalConflict`;
+        * expiry -- a past ``expires_at`` flips the row to ``expired`` and raises
+          :class:`ApprovalExpired`;
+        * binding -- the stored ``decision_signature`` covers the approval id,
+          task id, decision, actor and time.
+
+        This method only mutates the record; it never executes the command.
+        """
+        decision_v = _require_approval_decision(decision)
+        decided_by = _require_text(decided_by, "decided_by")
+        now = models.normalize_ts(decided_at or models.now_utc())
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM approvals WHERE id=?", (approval_id,)
+            ).fetchone()
+            if row is None:
+                raise ApprovalNotFound(approval_id)
+            current = _approval_from_row(row)
+            if current["status"] != "pending":
+                raise ApprovalConflict(approval_id, current["status"])
+            if _parse_ts(now) > _parse_ts(current["expires_at"]):
+                conn.execute(
+                    "UPDATE approvals SET status='expired' WHERE id=?", (approval_id,)
+                )
+                conn.commit()
+                raise ApprovalExpired(approval_id)
+            signature = sign_decision(
+                self.approval_signing_key,
+                approval_id,
+                current["task_id"],
+                decision_v,
+                decided_by,
+                now,
+            )
+            conn.execute(
+                "UPDATE approvals SET status=?, decided_at=?, decided_by=?, "
+                "decision_signature=? WHERE id=?",
+                (decision_v, now, decided_by, signature, approval_id),
+            )
+            conn.commit()
+            return self._get_approval(conn, approval_id)
+        finally:
+            conn.close()
+
+    def verify_approval_signature(
+        self,
+        approval_id: str,
+        task_id: str,
+        decision: str,
+        decided_by: str,
+        decided_at: str,
+        signature: str | None,
+    ) -> bool:
+        """Verify a recorded decision signature against the bound fields."""
+        return verify_decision(
+            self.approval_signing_key,
+            approval_id,
+            task_id,
+            decision,
+            decided_by,
+            decided_at,
+            signature,
+        )
+
+
+__all__ = [
+    "ApprovalConflict",
+    "ApprovalError",
+    "ApprovalExpired",
+    "ApprovalNotFound",
+    "DEFAULT_APPROVAL_TTL_SECONDS",
+    "DEFAULT_DB_PATH",
+    "Store",
+    "generate_approval_id",
+    "get_db_path",
+    "sign_decision",
+    "verify_decision",
+]

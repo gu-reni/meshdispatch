@@ -142,7 +142,10 @@ body {
   width: 100%;
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas:
+    "approvals approvals"
+    "list detail";
   gap: 1rem;
   padding: 1rem;
   max-width: 1280px;
@@ -159,6 +162,18 @@ body {
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
+}
+
+.pane--approvals {
+  grid-area: approvals;
+}
+
+.pane--list {
+  grid-area: list;
+}
+
+.pane--detail {
+  grid-area: detail;
 }
 
 .pane__heading {
@@ -202,6 +217,113 @@ body {
   border-radius: 8px;
   padding: 0.3rem 0.7rem;
   cursor: pointer;
+}
+
+/* ---------------------------------------------------------------------------
+   task creation form
+--------------------------------------------------------------------------- */
+
+.task-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding-bottom: 0.9rem;
+  margin-bottom: 0.9rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.field__label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
+
+.field__control {
+  font: inherit;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+}
+
+textarea.field__control {
+  resize: vertical;
+}
+
+.field__choice-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+}
+
+.choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+
+.participants {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.participant {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fafbfc;
+  cursor: pointer;
+}
+
+.participant__name {
+  overflow-wrap: anywhere;
+}
+
+.task-form__actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.btn {
+  font: inherit;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.4rem 0.9rem;
+  cursor: pointer;
+}
+
+.btn:active {
+  filter: brightness(0.95);
+}
+
+.task-form__result {
+  margin: 0;
+}
+
+.note--success {
+  color: #15803d;
+  font-style: normal;
 }
 
 /* ---------------------------------------------------------------------------
@@ -254,6 +376,24 @@ body {
   background: #fffbeb;
   color: #b45309;
   border-color: #fde68a;
+}
+
+.badge[data-status="low"] {
+  background: #f0fdf4;
+  color: #15803d;
+  border-color: #bbf7d0;
+}
+
+.badge[data-status="medium"] {
+  background: #fffbeb;
+  color: #b45309;
+  border-color: #fde68a;
+}
+
+.badge[data-status="high"] {
+  background: #fef2f2;
+  color: #b91c1c;
+  border-color: #fecaca;
 }
 
 /* ---------------------------------------------------------------------------
@@ -515,12 +655,158 @@ body {
 }
 
 /* ---------------------------------------------------------------------------
+   approvals panel
+--------------------------------------------------------------------------- */
+
+.pane--approvals {
+  max-height: 40vh;
+}
+
+.approvals {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.approval {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  background: #fafbfc;
+  min-width: 0;
+}
+
+.approval[data-risk="high"] {
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
+.approval__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.35rem;
+}
+
+.approval__agent {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.approval__id {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.approval__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-bottom: 0.4rem;
+}
+
+.approval__command {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-bottom: 0.4rem;
+  min-width: 0;
+}
+
+.approval__command-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
+
+.approval__command-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.approval__totp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.approval__totp-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #b91c1c;
+}
+
+.approval__totp {
+  font: inherit;
+  width: 100%;
+  max-width: 12rem;
+  min-width: 0;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+}
+
+.approval__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.btn--approve {
+  background: #15803d;
+  border-color: #15803d;
+}
+
+.btn--reject {
+  background: #b91c1c;
+  border-color: #b91c1c;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.approval__result {
+  margin: 0.4rem 0 0;
+}
+
+/* ---------------------------------------------------------------------------
    responsive: single column below 800px
 -------------------------------------------------------------------------- */
 
 @media (max-width: 800px) {
   .layout {
     grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas:
+      "approvals"
+      "main";
+  }
+
+  .pane--list {
+    grid-area: main;
+  }
+
+  .pane--detail {
+    grid-area: main;
   }
 
   .detail__back {
