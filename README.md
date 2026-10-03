@@ -43,7 +43,27 @@ meshdispatch takes the opposite position:
   tracked the same way as local ones, over the A2A protocol.
 - **Run history, not just last status.** Each execution is stored separately with its
   own outcome, so you can see how a task has behaved over time.
-- **Zero runtime dependencies.** Phase 1 is pure Python standard library + SQLite.
+- **Zero runtime dependencies.** The whole thing is Python standard library + SQLite.
+
+## What is running today
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
+
+# collect what your agents already did, from their own logs
+export MESHDISPATCH_DB=./meshdispatch.db
+.venv/bin/meshdispatch sync --adapter all      # cron jobs, subagent traces, A2A conversations
+.venv/bin/meshdispatch list
+
+# serve the dashboard (task list, run history, inter-agent conversations,
+# live updates over server-sent events). Auth is required: SSH-signed login,
+# password + TOTP, or GitHub OAuth, with device binding and an audit log.
+.venv/bin/python -m meshdispatch.web.server
+```
+
+The adapters read the logs Hermes already writes and are read-only with respect to
+them — they never modify the sources. Registration is idempotent, so running `sync`
+repeatedly does not create duplicates.
 
 ## Task model
 
@@ -81,16 +101,18 @@ Also runnable as a module: `python -m meshdispatch list`.
 
 ## Status
 
-**Early development.** Phase 1 — the task model, store, registry and CLI — is
-implemented and tested. Not yet built: source adapters, the web dashboard with live
-push, and authentication. See the roadmap below.
+**Working, but young.** Phases 1 to 3 are implemented and covered by 96 tests:
+the task model and CLI, the collection adapters, and a dashboard with live push and
+layered authentication. Not yet built: dispatching tasks from the dashboard and the
+click-to-approve queue for guarded commands. See the roadmap below.
 
 | Phase | Scope | State |
 |---|---|---|
 | 1 | Task model, store, registry, CLI | ✅ done |
-| 2 | Adapters (cron / A2A / subagent) + conversation capture | 🚧 planned |
-| 3 | Web dashboard with server-sent events + authentication | 🚧 planned |
-| 4 | Cross-server onboarding, docs, packaging | 🚧 planned |
+| 2 | Adapters (cron / A2A / subagent) + conversation capture | ✅ done |
+| 3 | Web dashboard with server-sent events + authentication | ✅ done |
+| 4 | Dispatch tasks from the dashboard, click-to-approve command queue | 🚧 planned |
+| 5 | Cross-server onboarding, packaging, docs | 🚧 planned |
 
 ## License
 

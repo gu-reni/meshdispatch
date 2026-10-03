@@ -351,3 +351,36 @@ __all__ = [
     "create_server",
     "main",
 ]
+
+
+def _main() -> int:
+    """Entry point for ``python -m meshdispatch.web.server``.
+
+    Everything is configurable through the environment so the dashboard can be
+    started without arguments::
+
+        MESHDISPATCH_HOST   interface to bind (default 127.0.0.1)
+        MESHDISPATCH_PORT   port to bind (default 8080)
+        MESHDISPATCH_DB     SQLite database to read (see meshdispatch.store)
+
+    Authentication uses the real ``meshdispatch.auth`` implementation; if that
+    package is unavailable every request is denied rather than allowed.
+    """
+    import os
+
+    host = os.environ.get("MESHDISPATCH_HOST", "127.0.0.1")
+    port = int(os.environ.get("MESHDISPATCH_PORT", "8080"))
+    server = create_server(host, port)
+    bound_host, bound_port = server.server_address[0], server.server_address[1]
+    print(f"meshdispatch dashboard on http://{bound_host}:{bound_port}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nshutting down", flush=True)
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
