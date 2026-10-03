@@ -14,7 +14,7 @@ from typing import Any
 #: Tables watched for change detection.  ``tasks`` and ``approvals`` use a TEXT
 #: primary key but still carry an implicit ``rowid``, so ``MAX(rowid)`` is a
 #: uniform marker across every table.
-_TABLES = ("tasks", "runs", "messages", "events", "approvals")
+_TABLES = ("tasks", "runs", "messages", "events", "approvals", "pairings")
 
 
 class ChangeTracker:

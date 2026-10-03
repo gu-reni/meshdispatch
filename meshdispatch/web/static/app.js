@@ -31,6 +31,9 @@ const els = {
   taskFormResult: document.getElementById("task-form-result"),
   approvalsList: document.getElementById("approvals-list"),
   approvalCount: document.getElementById("approval-count"),
+  pairingsList: document.getElementById("pairings-list"),
+  pairingCount: document.getElementById("pairing-count"),
+  devicesList: document.getElementById("devices-list"),
 };
 
 const state = {
@@ -38,6 +41,8 @@ const state = {
   agents: new Map(),
   selectedTaskId: null,
   approvals: new Map(),
+  pairings: new Map(),
+  devices: new Map(),
 };
 
 // ---------------------------------------------------------------------------
@@ -511,6 +516,245 @@ async function loadApprovals() {
 }
 
 // ---------------------------------------------------------------------------
+// devices + pairing panel
+// ---------------------------------------------------------------------------
+
+function describePairingError(err) {
+  if (err && err.status === 403) {
+    return "A valid TOTP code is required to approve or reject a pairing.";
+  }
+  if (err && err.status === 409) {
+    return "This pairing was already decided or has expired.";
+  }
+  if (err && err.status === 404) {
+    return "This pairing no longer exists.";
+  }
+  return "Failed to decide (" + (err && err.message ? err.message : "network error") + ").";
+}
+
+async function decidePairing(id, decision, totp) {
+  const payload = { decision: decision };
+  if (totp) payload.totp = totp;
+  const res = await fetch(
+    "/api/pairings/" + encodeURIComponent(id) + "/decide",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(payload),
+    }
+  );
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error((data && data.error) || "HTTP " + res.status);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+async function revokeDevice(id) {
+  const res = await fetch(
+    "/api/devices/" + encodeURIComponent(id) + "/revoke",
+    { method: "POST", headers: { Accept: "application/json" } }
+  );
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error((data && data.error) || "HTTP " + res.status);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+function buildPairingCard(pairing) {
+  const card = el("div", "pairing");
+
+  const head = el("div", "pairing__head");
+  head.append(
+    el("span", "pairing__name", pairing.display_name),
+    el("span", "pairing__id", pairing.id)
+  );
+
+  const meta = el("div", "pairing__meta");
+  meta.append(
+    metaItem("fingerprint", pairing.key_fingerprint),
+    metaItem("time left", fmtRemaining(pairing.expires_at))
+  );
+
+  card.append(head, meta);
+
+  const codeBlock = el("div", "pairing__code");
+  codeBlock.append(el("span", "pairing__code-label", "pairing code"));
+  codeBlock.append(
+    el("span", "pairing__code-value", pairing.code || "—"),
+    el("span", "pairing__code-hint", "compare with what the machine shows")
+  );
+  card.append(codeBlock);
+
+  const expired = remainingMs(pairing.expires_at) <= 0;
+
+  const totpField = el("label", "pairing__totp-field");
+  totpField.append(el("span", "pairing__totp-label", "TOTP code (required)"));
+  const totpInput = document.createElement("input");
+  totpInput.type = "text";
+  totpInput.inputMode = "numeric";
+  totpInput.autocomplete = "one-time-code";
+  totpInput.className = "pairing__totp";
+  totpInput.placeholder = "6-digit code";
+  totpField.append(totpInput);
+  card.append(totpField);
+
+  const actions = el("div", "pairing__actions");
+  const approveBtn = el("button", "btn btn--approve", "Approve");
+  approveBtn.type = "button";
+  const rejectBtn = el("button", "btn btn--reject", "Reject");
+  rejectBtn.type = "button";
+  approveBtn.disabled = expired;
+  rejectBtn.disabled = expired;
+  actions.append(approveBtn, rejectBtn);
+
+  const result = el("p", "note pairing__result", "");
+  result.hidden = true;
+
+  function handleDecision(decision) {
+    result.hidden = false;
+    result.textContent = "Submitting…";
+    result.classList.remove("note--error", "note--success");
+    decidePairing(pairing.id, decision, totpInput.value.trim())
+      .then((updated) => {
+        result.textContent = "Pairing " + updated.status + ".";
+        result.classList.remove("note--error");
+        result.classList.add("note--success");
+        loadPairings();
+        loadDevices();
+      })
+      .catch((err) => {
+        result.textContent = describePairingError(err);
+        result.classList.remove("note--success");
+        result.classList.add("note--error");
+        loadPairings();
+      });
+  }
+
+  approveBtn.addEventListener("click", () => handleDecision("approve"));
+  rejectBtn.addEventListener("click", () => handleDecision("reject"));
+
+  if (expired) {
+    card.append(el("p", "note note--error", "This request has expired."));
+  }
+
+  card.append(actions, result);
+  return card;
+}
+
+function renderPairings() {
+  const list = els.pairingsList;
+  list.textContent = "";
+  const pending = Array.from(state.pairings.values()).filter(
+    (p) => p.status === "pending"
+  );
+  els.pairingCount.textContent = String(pending.length);
+
+  if (pending.length === 0) {
+    list.append(emptyNote("No pending pairing requests."));
+    return;
+  }
+
+  pending
+    .slice()
+    .sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""))
+    .forEach((p) => list.append(buildPairingCard(p)));
+}
+
+function buildDeviceRow(device) {
+  const row = el("div", "device");
+
+  const head = el("div", "device__head");
+  head.append(
+    el("span", "device__name", device.device_name || "(unnamed)"),
+    badge(device.confirmed ? "approved" : "revoked")
+  );
+
+  const meta = el("div", "device__meta");
+  meta.append(
+    metaItem("id", device.device_id),
+    metaItem("principal", device.principal || "—"),
+    metaItem("created", fmtTime(device.created_at))
+  );
+
+  row.append(head, meta);
+
+  const actions = el("div", "device__actions");
+  const revokeBtn = el("button", "btn btn--reject", "Revoke");
+  revokeBtn.type = "button";
+  revokeBtn.disabled = !device.confirmed;
+  actions.append(revokeBtn);
+  row.append(actions);
+
+  const result = el("p", "note device__result", "");
+  result.hidden = true;
+
+  revokeBtn.addEventListener("click", () => {
+    result.hidden = false;
+    result.textContent = "Revoking…";
+    result.classList.remove("note--error", "note--success");
+    revokeDevice(device.device_id)
+      .then(() => {
+        result.textContent = "Device revoked.";
+        result.classList.remove("note--error");
+        result.classList.add("note--success");
+        loadDevices();
+      })
+      .catch((err) => {
+        result.textContent = "Failed to revoke (" + err.message + ").";
+        result.classList.remove("note--success");
+        result.classList.add("note--error");
+      });
+  });
+
+  row.append(result);
+  return row;
+}
+
+function renderDevices() {
+  const list = els.devicesList;
+  list.textContent = "";
+  const devices = Array.from(state.devices.values()).sort((a, b) =>
+    (a.created_at || "").localeCompare(b.created_at || "")
+  );
+  if (devices.length === 0) {
+    list.append(emptyNote("No authorised devices."));
+    return;
+  }
+  for (const device of devices) {
+    list.append(buildDeviceRow(device));
+  }
+}
+
+async function loadPairings() {
+  try {
+    const pairings = await api("/api/pairings");
+    state.pairings = new Map(pairings.map((p) => [p.id, p]));
+    renderPairings();
+  } catch (err) {
+    els.pairingsList.textContent = "";
+    els.pairingCount.textContent = "";
+    els.pairingsList.append(errorNote(err));
+  }
+}
+
+async function loadDevices() {
+  try {
+    const devices = await api("/api/devices");
+    state.devices = new Map(devices.map((d) => [d.device_id, d]));
+    renderDevices();
+  } catch (err) {
+    els.devicesList.textContent = "";
+    els.devicesList.append(errorNote(err));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // task creation form
 // ---------------------------------------------------------------------------
 
@@ -689,6 +933,8 @@ async function refresh() {
   await loadStats();
   await loadTasks();
   await loadApprovals();
+  await loadPairings();
+  await loadDevices();
   if (state.selectedTaskId) await loadDetail(state.selectedTaskId);
 }
 
@@ -702,7 +948,7 @@ function connectStream() {
 
   source.addEventListener("hello", () => setStreamState("live"));
 
-  for (const table of ["tasks", "runs", "messages", "events", "approvals"]) {
+  for (const table of ["tasks", "runs", "messages", "events", "approvals", "pairings"]) {
     source.addEventListener(table, () => scheduleRefresh());
   }
 
@@ -726,6 +972,8 @@ function init() {
   loadStats();
   loadTasks();
   loadApprovals();
+  loadPairings();
+  loadDevices();
   connectStream();
   // Re-render the approvals panel periodically so "time left" stays current
   // even when nothing else changes (approvals expire on a 30-minute budget).

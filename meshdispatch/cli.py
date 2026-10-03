@@ -175,6 +175,29 @@ def build_parser() -> argparse.ArgumentParser:
     trevoke.add_argument("id", help="token id")
     trevoke.add_argument("--json", action="store_true")
 
+    device = sub.add_parser("device", help="Pair a machine with this panel")
+    devicesub = device.add_subparsers(dest="device_command", required=True)
+
+    dkeygen = devicesub.add_parser("keygen", help="Generate a local device keypair")
+    dkeygen.add_argument("--out", default=".", help="directory to write keys into")
+    dkeygen.add_argument("--bits", type=int, default=2048, help="RSA key size")
+    dkeygen.add_argument("--json", action="store_true")
+
+    drequest = devicesub.add_parser(
+        "request", help="Post the public key to a panel and print the pairing code"
+    )
+    drequest.add_argument("--to", required=True, dest="url", help="panel /api/pairings URL")
+    drequest.add_argument("--name", required=True, help="display name for this machine")
+    drequest.add_argument("--key", dest="key_path", help="public key file (default: ./meshdispatch_key.pub)")
+    drequest.add_argument("--json", action="store_true")
+
+    dlist = devicesub.add_parser("list", help="List authorised devices")
+    dlist.add_argument("--json", action="store_true")
+
+    drevoke = devicesub.add_parser("revoke", help="Revoke a device")
+    drevoke.add_argument("id", help="device id")
+    drevoke.add_argument("--json", action="store_true")
+
     return p
 
 
@@ -641,8 +664,173 @@ def _dispatch(args: argparse.Namespace, store: Store) -> int:
         print(f"error: unknown token command {args.token_command}", file=sys.stderr)
         return 2
 
+    if cmd == "device":
+        return _device_dispatch(args)
+
     print(f"error: unknown command {cmd}", file=sys.stderr)
     return 2
+
+
+def _device_dispatch(args: argparse.Namespace) -> int:
+    if args.device_command == "keygen":
+        return _device_keygen(args)
+    if args.device_command == "request":
+        return _device_request(args)
+    if args.device_command == "list":
+        return _device_list(args)
+    if args.device_command == "revoke":
+        return _device_revoke(args)
+    print(f"error: unknown device command {args.device_command}", file=sys.stderr)
+    return 2
+
+
+def _device_keygen(args: argparse.Namespace) -> int:
+    from .auth.crypto import generate_rsa_keypair, serialize_ssh_public_key
+
+    out_dir = os.path.abspath(args.out)
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as exc:
+        print(f"error: cannot create output directory: {exc}", file=sys.stderr)
+        return 1
+
+    keypair = generate_rsa_keypair(bits=args.bits)
+    public = {"n": keypair["n"], "e": keypair["e"]}
+    pub_line = serialize_ssh_public_key(public, comment="meshdispatch")
+
+    priv_path = os.path.join(out_dir, "meshdispatch_key")
+    pub_path = os.path.join(out_dir, "meshdispatch_key.pub")
+
+    private_doc = {
+        "n": keypair["n"],
+        "e": keypair["e"],
+        "d": keypair["d"],
+        "p": keypair["p"],
+        "q": keypair["q"],
+    }
+    try:
+        with open(priv_path, "w", encoding="utf-8") as fh:
+            json.dump(private_doc, fh)
+        os.chmod(priv_path, 0o600)
+        with open(pub_path, "w", encoding="utf-8") as fh:
+            fh.write(pub_line + "\n")
+    except OSError as exc:
+        print(f"error: failed to write key files: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        _print_json({"private": priv_path, "public": pub_path})
+    else:
+        print(f"private key: {priv_path}")
+        print(f"public key:  {pub_path}")
+    return 0
+
+
+def _device_public_key(args: argparse.Namespace) -> str:
+    path = args.key_path or os.path.join(os.getcwd(), "meshdispatch_key.pub")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            line = fh.read().strip()
+    except OSError as exc:
+        raise ValueError(f"cannot read public key file {path}: {exc}") from exc
+    if not line:
+        raise ValueError(f"public key file {path} is empty")
+    return line
+
+
+def _device_request(args: argparse.Namespace) -> int:
+    import urllib.error
+    import urllib.request
+
+    try:
+        public_key = _device_public_key(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    payload = json.dumps(
+        {"public_key": public_key, "display_name": args.name}, ensure_ascii=False
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        args.url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            status = resp.status
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+        except (ValueError, json.JSONDecodeError):
+            body = {}
+    except urllib.error.URLError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if status != 201:
+        reason = body.get("error") if isinstance(body, dict) else ""
+        print(f"error: pairing request failed (HTTP {status})"
+              + (f": {reason}" if reason else ""), file=sys.stderr)
+        return 1
+
+    if args.json:
+        _print_json(body)
+    else:
+        print("Pairing request created. Give this code to the panel owner:")
+        print()
+        print(f"  code:  {body['code']}")
+        print(f"  id:    {body['id']}")
+        print(f"  until: {body['expires_at']}")
+    return 0
+
+
+def _device_manager():
+    from .auth import AuthConfig, AuthManager
+
+    state_dir = os.environ.get("MESHDISPATCH_AUTH_STATE_DIR")
+    return AuthManager(AuthConfig(), state_dir=state_dir or None)
+
+
+def _device_list(args: argparse.Namespace) -> int:
+    from .control.pairing import device_lister_from_manager
+
+    devices = device_lister_from_manager(_device_manager())()
+    if args.json:
+        _print_json(devices)
+        return 0
+    if not devices:
+        print("(no devices)")
+        return 0
+    headers = ["ID", "PRINCIPAL", "NAME", "CONFIRMED", "CREATED_AT"]
+    rows = [
+        [
+            d.get("device_id") or "-",
+            d.get("principal") or "-",
+            d.get("device_name") or "-",
+            "yes" if d.get("confirmed") else "no",
+            d.get("created_at") or "-",
+        ]
+        for d in devices
+    ]
+    _print_table(headers, rows)
+    return 0
+
+
+def _device_revoke(args: argparse.Namespace) -> int:
+    from .control.pairing import device_revoker_from_manager
+
+    if device_revoker_from_manager(_device_manager())(args.id):
+        if args.json:
+            _print_json({"id": args.id, "revoked": True})
+        else:
+            print(f"revoked device {args.id}")
+        return 0
+    print(f"error: no such device {args.id}", file=sys.stderr)
+    return 1
 
 
 def _cli_totp_ok(secret: str, code: str | None) -> bool:

@@ -144,7 +144,7 @@ body {
   grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
   grid-template-rows: auto minmax(0, 1fr);
   grid-template-areas:
-    "approvals approvals"
+    "approvals devices"
     "list detail";
   gap: 1rem;
   padding: 1rem;
@@ -166,6 +166,10 @@ body {
 
 .pane--approvals {
   grid-area: approvals;
+}
+
+.pane--devices {
+  grid-area: devices;
 }
 
 .pane--list {
@@ -394,6 +398,18 @@ textarea.field__control {
   background: #fef2f2;
   color: #b91c1c;
   border-color: #fecaca;
+}
+
+.badge[data-status="approved"] {
+  background: #f0fdf4;
+  color: #15803d;
+  border-color: #bbf7d0;
+}
+
+.badge[data-status="revoked"] {
+  background: #f3f4f6;
+  color: #6b7280;
+  border-color: #e5e7eb;
 }
 
 /* ---------------------------------------------------------------------------
@@ -658,7 +674,8 @@ textarea.field__control {
    approvals panel
 --------------------------------------------------------------------------- */
 
-.pane--approvals {
+.pane--approvals,
+.pane--devices {
   max-height: 40vh;
 }
 
@@ -789,15 +806,191 @@ textarea.field__control {
 }
 
 /* ---------------------------------------------------------------------------
+   devices + pairing panel
+--------------------------------------------------------------------------- */
+
+.devices__subheading {
+  margin: 0 0 0.5rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
+
+.devices__subheading:not(:first-of-type) {
+  margin-top: 1rem;
+}
+
+.pairings,
+.devices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.pairing {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  background: #fafbfc;
+  min-width: 0;
+}
+
+.pairing__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.35rem;
+}
+
+.pairing__name {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.pairing__id {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.pairing__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-bottom: 0.4rem;
+}
+
+.pairing__code {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  background: var(--accent-soft);
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+  min-width: 0;
+}
+
+.pairing__code-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.pairing__code-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  overflow-wrap: anywhere;
+}
+
+.pairing__code-hint {
+  color: var(--muted);
+  font-size: 0.72rem;
+  width: 100%;
+}
+
+.pairing__totp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.pairing__totp-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #b91c1c;
+}
+
+.pairing__totp {
+  font: inherit;
+  width: 100%;
+  max-width: 12rem;
+  min-width: 0;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+}
+
+.pairing__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.pairing__result {
+  margin: 0.4rem 0 0;
+}
+
+.device {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  background: #fafbfc;
+  min-width: 0;
+}
+
+.device__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.3rem;
+}
+
+.device__name {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.device__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.device__actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.device__result {
+  margin: 0.4rem 0 0;
+}
+
+/* ---------------------------------------------------------------------------
    responsive: single column below 800px
 -------------------------------------------------------------------------- */
 
 @media (max-width: 800px) {
   .layout {
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr);
     grid-template-areas:
       "approvals"
+      "devices"
       "main";
   }
 

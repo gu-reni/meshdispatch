@@ -124,6 +124,22 @@ CREATE TABLE IF NOT EXISTS ingest_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
 CREATE INDEX IF NOT EXISTS idx_approvals_requested_at ON approvals(requested_at);
+
+CREATE TABLE IF NOT EXISTS pairings (
+    id              TEXT PRIMARY KEY,
+    code_hash       TEXT NOT NULL,
+    display_name    TEXT NOT NULL,
+    public_key      TEXT NOT NULL,
+    key_fingerprint TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    expires_at      TEXT NOT NULL,
+    decided_at      TEXT,
+    decided_by      TEXT,
+    device_id       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pairings_status ON pairings(status);
 """
 
 # Columns added since the phase-1 schema.  ``connect`` runs these as idempotent
@@ -201,6 +217,10 @@ def _agent_from_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _approval_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return _row_to_dict(row)
+
+
+def _pairing_from_row(row: sqlite3.Row) -> dict[str, Any]:
     return _row_to_dict(row)
 
 
@@ -1342,6 +1362,111 @@ class Store:
         if not verify_password(secret, row["token_hash"]):
             return None
         return {"id": row["id"], "agent": row["agent"]}
+
+    # -- pairings ----------------------------------------------------------
+
+    def insert_pairing(
+        self,
+        *,
+        pairing_id: str,
+        code_hash: str,
+        display_name: str,
+        public_key: str,
+        key_fingerprint: str,
+        status: str,
+        created_at: str,
+        expires_at: str,
+    ) -> dict[str, Any]:
+        conn = self.connect()
+        try:
+            conn.execute(
+                "INSERT INTO pairings (id, code_hash, display_name, public_key, "
+                "key_fingerprint, status, created_at, expires_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    pairing_id,
+                    code_hash,
+                    display_name,
+                    public_key,
+                    key_fingerprint,
+                    status,
+                    created_at,
+                    expires_at,
+                ),
+            )
+            conn.commit()
+            return self._get_pairing(conn, pairing_id)
+        finally:
+            conn.close()
+
+    def get_pairing(self, pairing_id: str) -> dict[str, Any] | None:
+        conn = self.connect()
+        try:
+            return self._get_pairing(conn, pairing_id)
+        finally:
+            conn.close()
+
+    def _get_pairing(
+        self, conn: sqlite3.Connection, pairing_id: str
+    ) -> dict[str, Any]:
+        row = conn.execute(
+            "SELECT * FROM pairings WHERE id=?", (pairing_id,)
+        ).fetchone()
+        return _pairing_from_row(row) if row else None
+
+    def list_pairings(self, status: str | None = None) -> list[dict[str, Any]]:
+        """List pairings, pending first, then most recently created."""
+        if status is not None:
+            where = " WHERE status=?"
+            params: list[Any] = [status]
+        else:
+            where = ""
+            params = []
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM pairings{where} "
+                "ORDER BY CASE WHEN status='pending' THEN 0 ELSE 1 END ASC, "
+                "created_at DESC, rowid DESC",
+                params,
+            ).fetchall()
+            return [_pairing_from_row(r) for r in rows]
+        finally:
+            conn.close()
+
+    def find_pairing_by_public_key(self, public_key: str) -> dict[str, Any] | None:
+        """Return the most recent pairing carrying ``public_key``, if any."""
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM pairings WHERE public_key=? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (public_key,),
+            ).fetchone()
+            return _pairing_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def set_pairing_decision(
+        self,
+        pairing_id: str,
+        *,
+        status: str,
+        decided_at: str | None = None,
+        decided_by: str | None = None,
+        device_id: str | None = None,
+    ) -> dict[str, Any]:
+        conn = self.connect()
+        try:
+            conn.execute(
+                "UPDATE pairings SET status=?, decided_at=?, decided_by=?, "
+                "device_id=? WHERE id=?",
+                (status, decided_at, decided_by, device_id, pairing_id),
+            )
+            conn.commit()
+            return self._get_pairing(conn, pairing_id)
+        finally:
+            conn.close()
 
 
 
