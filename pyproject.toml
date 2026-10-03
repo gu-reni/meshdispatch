@@ -26,8 +26,8 @@ meshdispatch = "meshdispatch.cli:main"
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
-[tool.setuptools]
-packages = ["meshdispatch", "meshdispatch.adapters"]
+[tool.setuptools.packages.find]
+include = ["meshdispatch*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

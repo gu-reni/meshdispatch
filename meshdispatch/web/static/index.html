@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>meshdispatch</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar__brand">
+      <span class="topbar__title">meshdispatch</span>
+      <span class="topbar__state" id="stream-state" data-state="connecting">connecting</span>
+    </div>
+    <div class="topbar__stats" id="stats" aria-label="Counts by origin and status"></div>
+  </header>
+
+  <main class="layout">
+    <section class="pane pane--list" id="task-list-pane" aria-labelledby="task-list-heading">
+      <h2 class="pane__heading" id="task-list-heading">Tasks <span class="task-list__count" id="task-count"></span></h2>
+      <div class="task-list" id="task-list"></div>
+    </section>
+
+    <section class="pane pane--detail" id="task-detail-pane" aria-labelledby="task-detail-heading">
+      <button class="detail__back" id="detail-back" type="button">← Back to tasks</button>
+      <h2 class="pane__heading sr-only" id="task-detail-heading">Task detail</h2>
+      <div id="task-detail"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

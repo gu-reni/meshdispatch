@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import models
+from .redact import redact
 
 DEFAULT_DB_PATH = "meshdispatch.db"
 
@@ -173,6 +174,23 @@ def _as_list(value: Iterable[str] | str | None) -> list[str]:
     if isinstance(value, str):
         return [value]
     return [str(v) for v in value]
+
+
+def _redact_payload(payload: Any) -> Any:
+    """Recursively redact credential-shaped strings inside a payload.
+
+    Applied to event payloads before they are serialized so that a tool-call
+    argument carrying a credential never reaches the database.  Only string
+    *values* are rewritten; keys and non-string values pass through unchanged,
+    so the redacted payload stays valid JSON.
+    """
+    if isinstance(payload, dict):
+        return {key: _redact_payload(value) for key, value in payload.items()}
+    if isinstance(payload, list):
+        return [_redact_payload(item) for item in payload]
+    if isinstance(payload, str):
+        return redact(payload)
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +433,7 @@ class Store:
                     status_v,
                     now,
                     _empty_to_none(outcome),
-                    _empty_to_none(summary),
+                    _empty_to_none(redact(summary)),
                     _empty_to_none(error_type),
                     run_id,
                 ),
@@ -470,7 +488,7 @@ class Store:
                     started,
                     ended,
                     _empty_to_none(outcome),
-                    _empty_to_none(summary),
+                    _empty_to_none(redact(summary)),
                     _empty_to_none(error_type),
                     _empty_to_none(source_key),
                 ),
@@ -590,7 +608,7 @@ class Store:
             cur = conn.execute(
                 "INSERT INTO events (task_id, run_id, kind, payload, created_at) "
                 "VALUES (?,?,?,?,?)",
-                (task_id, run_id, kind, json.dumps(payload, ensure_ascii=False), now),
+                (task_id, run_id, kind, json.dumps(_redact_payload(payload), ensure_ascii=False), now),
             )
             ev_id = cur.lastrowid
             conn.execute("UPDATE tasks SET updated_at=? WHERE id=?", (now, task_id))
@@ -633,7 +651,7 @@ class Store:
                     task_id,
                     run_id,
                     kind,
-                    json.dumps(payload, ensure_ascii=False),
+                    json.dumps(_redact_payload(payload), ensure_ascii=False),
                     _empty_to_none(source_key),
                     ts,
                 ),
