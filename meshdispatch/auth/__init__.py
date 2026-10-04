@@ -53,6 +53,15 @@ def configure(config: AuthConfig | dict | None = None, **kwargs: Any) -> AuthMan
     return _manager
 
 
+def get_manager() -> AuthManager | None:
+    """Return the module-level manager, or ``None`` when unconfigured.
+
+    Used by the web layer to reach the session/nonce helpers behind
+    :func:`authenticate` without reaching into the private module global.
+    """
+    return _manager
+
+
 def authenticate(request: Any) -> Identity | None:
     """Authenticate a request (frozen interface).  Never raises."""
     if _manager is None:
@@ -80,6 +89,7 @@ __all__ = [
     "enroll_device",
     "revoke_all_sessions",
     "configure",
+    "get_manager",
     "AuthManager",
     "AuthConfig",
     "PrincipalConfig",

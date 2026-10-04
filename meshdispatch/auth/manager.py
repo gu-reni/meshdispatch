@@ -468,6 +468,34 @@ class AuthManager:
         )
         return True
 
+    def revoke_device(self, device_id: str) -> bool:
+        """Revoke a previously confirmed device; return whether it existed.
+
+        Revocation un-confirms the device in place: the device layer already
+        refuses unconfirmed devices, so this deauthorises the device while
+        keeping the device record (and its audit trail) intact.  A device that
+        is already unconfirmed is still reported as found, so the caller can
+        show an honest "revoked" result.
+        """
+        if not isinstance(device_id, str) or not device_id:
+            return False
+        rec = self.store.get_device(device_id)
+        if rec is None:
+            return False
+        was_confirmed = bool(rec.get("confirmed"))
+        rec["confirmed"] = False
+        rec["confirmed_at"] = None
+        rec["confirmed_by"] = None
+        self.store.set_device(device_id, rec)
+        if was_confirmed:
+            self._audit(
+                "device_revoke",
+                principal=rec.get("principal"),
+                result="success",
+                device_id=device_id,
+            )
+        return True
+
     # ------------------------------------------------------------------
     # Nonce / OAuth state
     # ------------------------------------------------------------------
@@ -525,6 +553,17 @@ class AuthManager:
             return None
         sid = payload.get("sid")
         return sid if isinstance(sid, str) else None
+
+    def session_id_from_cookie(self, cookie_value: str) -> str | None:
+        """Return the session id carried by a signed cookie value, or ``None``.
+
+        Public counterpart of :meth:`_cookie_to_session_id` for callers (the
+        web logout route) that hold the raw cookie value rather than a parsed
+        cookie jar.
+        """
+        if not isinstance(cookie_value, str) or not cookie_value:
+            return None
+        return self._cookie_to_session_id({self.config.cookie_name: cookie_value})
 
     def _session_identity(self, sid: str) -> Identity | None:
         rec = self.store.get_session(sid)

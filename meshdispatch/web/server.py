@@ -8,6 +8,7 @@ route is gated behind it and returns HTTP 401 when it yields ``None``.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
@@ -45,14 +46,26 @@ if TYPE_CHECKING:
 
 try:
     from meshdispatch.auth import authenticate as _auth_authenticate
+    from meshdispatch.auth import get_manager as _auth_get_manager
 except ImportError:  # pragma: no cover - auth lands later in phase 3
     _auth_authenticate = None
+    _auth_get_manager = None
 
 
-#: Path(s) exempt from authentication (the login/bootstrap entrypoint).  The
-#: auth layer owns what happens here; this module only guarantees the route is
-#: reachable without a session.
-PUBLIC_PATHS = frozenset({"/api/login"})
+#: Path(s) exempt from authentication: the login API and the login *page*.
+#: Nothing else is exempt.  ``/index.html`` and ``/static/app.js`` stay behind
+#: the auth gate; only the stylesheet the login page needs is added below.
+PUBLIC_PATHS = frozenset({"/api/login", "/login"})
+
+#: Static assets that may be fetched without a session.  This is the login
+#: page's own assets and nothing more: the shared stylesheet and the login
+#: script (neither carries data or secrets).  ``/index.html`` and ``app.js``
+#: remain behind the gate, so the dashboard itself is never reachable without a
+#: session.
+PUBLIC_STATIC_PATHS = frozenset({"/static/style.css", "/static/login.js"})
+
+#: Fallback session cookie name when no auth manager config is available.
+DEFAULT_COOKIE_NAME = "meshdispatch_session"
 
 #: Per-source-IP rate limit for the unauthenticated pairing bootstrap: a small
 #: window so a stranger cannot flood the owner's pending list.
@@ -197,6 +210,30 @@ def _compute_stats(store: Store) -> dict[str, dict[str, int]]:
     return {"by_origin": by_origin, "by_status": by_status}
 
 
+def _resolve_auth_manager(authenticator: Authenticator | None) -> Any | None:
+    """Recover the :class:`AuthManager` behind ``authenticator``, if any.
+
+    The login route needs the manager's session/nonce helpers in addition to
+    the plain ``authenticate`` callable.  We accept it when the caller passes a
+    manager instance directly, a bound ``manager.authenticate`` method, or (via
+    :func:`meshdispatch.auth.get_manager`) the module-level manager that backs
+    the frozen ``meshdispatch.auth.authenticate`` function.  Anything else means
+    login is simply unconfigured and fails closed.
+    """
+    if authenticator is None:
+        return None
+    candidate = getattr(authenticator, "__self__", None)
+    if candidate is not None and hasattr(candidate, "issue_session"):
+        return candidate
+    if hasattr(authenticator, "issue_session") and hasattr(
+        authenticator, "authenticate"
+    ):
+        return authenticator
+    if authenticator is _auth_authenticate and _auth_get_manager is not None:
+        return _auth_get_manager()
+    return None
+
+
 def create_app(
     store: Store,
     authenticator: Authenticator | None = None,
@@ -205,6 +242,7 @@ def create_app(
     enroll_device: Callable[[str, str], str] | None = None,
     list_devices: Callable[[], list[Any]] | None = None,
     revoke_device: Callable[[str], bool] | None = None,
+    auth_manager: Any | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build a request-handler class bound to ``store`` and ``authenticator``.
 
@@ -214,10 +252,20 @@ def create_app(
     approval to the auth layer's device store (defaults fail closed).  ``audit``
     receives approval audit events as
     ``audit(event, *, principal, approval_id, decision, ip)``.
+
+    ``auth_manager`` provides the session/nonce helpers used by ``POST
+    /api/login`` and ``POST /api/logout``.  It is optional: when omitted the
+    manager is recovered from ``authenticator`` (a bound ``manager.authenticate``
+    method or the module-level manager behind ``meshdispatch.auth.authenticate``)
+    and, if it cannot be, login returns 501 rather than weakening the gate.
     """
-    auth: Authenticator = (
-        authenticator if authenticator is not None else _DEFAULT_AUTHENTICATOR
-    )
+    managed: Any | None = auth_manager or _resolve_auth_manager(authenticator)
+    if authenticator is not None:
+        auth: Authenticator = authenticator
+    elif managed is not None:
+        auth = managed.authenticate
+    else:
+        auth = _DEFAULT_AUTHENTICATOR
     totp_check: Callable[[str, str], bool] = (
         totp_verifier if totp_verifier is not None else _deny_totp
     )
@@ -254,16 +302,10 @@ def create_app(
         def _authorize(self, request: Request) -> "Identity | None":
             """Run the request through auth; send a response on failure.
 
-            Returns the authenticated :class:`Identity` (or ``None`` once a
-            501/401 response has already been written).
+            Returns the authenticated :class:`Identity` (or ``None`` once a 401
+            response has already been written).  Public paths are dispatched by
+            the caller before this is reached, never here.
             """
-            if request.path in PUBLIC_PATHS:
-                self.close_connection = True
-                self._send_json(
-                    HTTPStatus.NOT_IMPLEMENTED,
-                    {"error": "login/bootstrap is handled by the auth layer"},
-                )
-                return None
             identity = auth(request)
             if identity is None:
                 self.close_connection = True
@@ -281,6 +323,14 @@ def create_app(
                 self.client_address[0],
                 self.path,
             )
+            # Public documents: the login page and the shared stylesheet it
+            # needs.  Served before the gate; nothing else is reachable here.
+            if request.path == "/login":
+                self._serve_static("login.html")
+                return
+            if request.path in PUBLIC_STATIC_PATHS:
+                self._serve_static(request.path[len("/static/") :])
+                return
             if self._authorize(request) is None:
                 return
 
@@ -327,11 +377,19 @@ def create_app(
             if request.path == "/api/pairings":
                 self._handle_pairing_create(request)
                 return
+            # The browser login exchange.  Reaching this route never grants a
+            # session by itself: the credentials are verified through the same
+            # AuthManager the rest of the server uses.
+            if request.path == "/api/login":
+                self._handle_login(request)
+                return
             identity = self._authorize(request)
             if identity is None:
                 return
 
-            if request.path == "/api/tasks":
+            if request.path == "/api/logout":
+                self._handle_logout(request)
+            elif request.path == "/api/tasks":
                 self._handle_task_create(request)
             elif request.path == "/api/approvals":
                 self._handle_approval_create(request, identity)
@@ -363,6 +421,187 @@ def create_app(
             if size <= 0:
                 return ""
             return self.rfile.read(size).decode("utf-8", errors="replace")
+
+        # -- login / logout ---------------------------------------------
+
+        def _session_cookie_name(self) -> str:
+            config = getattr(managed, "config", None)
+            name = getattr(config, "cookie_name", None)
+            return name if isinstance(name, str) and name else DEFAULT_COOKIE_NAME
+
+        def _session_cookie(self, value: str, *, max_age: int | None = None) -> str:
+            """Build a ``Set-Cookie`` value for the session.
+
+            Always ``HttpOnly`` + ``SameSite=Lax`` + ``Path=/``.  ``Secure`` is
+            only added when the auth config asks for it, so a plain-HTTP LAN
+            deployment still works by default.
+            """
+            parts = [
+                f"{self._session_cookie_name()}={value}",
+                "Path=/",
+                "HttpOnly",
+                "SameSite=Lax",
+            ]
+            if max_age is not None:
+                parts.append(f"Max-Age={max_age}")
+            config = getattr(managed, "config", None)
+            if bool(getattr(config, "cookie_secure", False)):
+                parts.append("Secure")
+            return "; ".join(parts)
+
+        def _login_request(self, headers: dict[str, str], request: Request) -> Request:
+            return Request(
+                headers={k.lower(): v for k, v in headers.items()},
+                cookies={},
+                client_ip=request.client_ip,
+                path="/api/login",
+                query={},
+            )
+
+        def _finish_login(self, request: Request, identity: Any) -> None:
+            """Issue a session for an authenticated identity, or deny."""
+            if identity is None:
+                self._send_json(
+                    HTTPStatus.UNAUTHORIZED,
+                    {"error": "invalid credentials"},
+                    headers={"WWW-Authenticate": 'Bearer realm="meshdispatch"'},
+                )
+                return
+            try:
+                cookie = managed.issue_session(
+                    identity.principal,
+                    identity.method,
+                    identity.device_id,
+                    request.client_ip,
+                )
+            except Exception:
+                self._send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": "could not issue a session"},
+                )
+                return
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "principal": identity.principal,
+                    "method": identity.method,
+                },
+                headers={"Set-Cookie": self._session_cookie(cookie)},
+            )
+
+        def _handle_login(self, request: Request) -> None:
+            if managed is None:
+                self._send_json(
+                    HTTPStatus.NOT_IMPLEMENTED,
+                    {"error": "login is not configured"},
+                )
+                return
+            raw = self._read_body()
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST, {"error": "invalid JSON body"}
+                )
+                return
+            if not isinstance(data, dict):
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST, {"error": "JSON body must be an object"}
+                )
+                return
+            method = data.get("method")
+            if method == "ssh":
+                self._login_ssh(request, data)
+            elif method == "password":
+                self._login_password(request, data)
+            else:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "method must be 'ssh' or 'password'"},
+                )
+
+        def _login_ssh(self, request: Request, data: dict[str, Any]) -> None:
+            """Challenge/response SSH login, delegated to the auth manager."""
+            principal = data.get("principal")
+            if not isinstance(principal, str) or not principal.strip():
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST, {"error": "principal is required"}
+                )
+                return
+            principal = principal.strip()
+            nonce = data.get("nonce")
+            signature = data.get("signature")
+            # No signature yet (or an explicit challenge request): hand back a
+            # one-time nonce the client signs with ``ssh-keygen -Y sign``.
+            if data.get("action") == "challenge" or not nonce or not signature:
+                try:
+                    from ..auth.ssh import SSH_SIGN_NAMESPACE
+                except ImportError:  # pragma: no cover - auth always present
+                    SSH_SIGN_NAMESPACE = "meshdispatch"
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "nonce": managed.issue_nonce(principal),
+                        "namespace": SSH_SIGN_NAMESPACE,
+                    },
+                )
+                return
+            if not isinstance(nonce, str) or not isinstance(signature, str):
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "nonce and signature must be strings"},
+                )
+                return
+            verify_request = self._login_request(
+                {
+                    "X-Mesh-Principal": principal,
+                    "X-Mesh-Nonce": nonce,
+                    "X-Mesh-Signature": signature,
+                },
+                request,
+            )
+            # The manager verifies the signature (ssh-keygen -Y verify for
+            # ed25519/ecdsa/rsa), applies the device layer and audits the result.
+            self._finish_login(request, managed.authenticate(verify_request))
+
+        def _login_password(self, request: Request, data: dict[str, Any]) -> None:
+            """Password (+ optional/required TOTP) login via the auth manager."""
+            principal = data.get("principal")
+            password = data.get("password")
+            if (
+                not isinstance(principal, str)
+                or not principal.strip()
+                or not isinstance(password, str)
+                or not password
+            ):
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "principal and password are required"},
+                )
+                return
+            token = base64.b64encode(
+                f"{principal.strip()}:{password}".encode("utf-8")
+            ).decode("ascii")
+            headers = {"Authorization": f"Basic {token}"}
+            totp = data.get("totp")
+            if isinstance(totp, str) and totp:
+                headers["X-Mesh-TOTP"] = totp
+            verify_request = self._login_request(headers, request)
+            self._finish_login(request, managed.authenticate(verify_request))
+
+        def _handle_logout(self, request: Request) -> None:
+            """Revoke the caller's session and clear the cookie (authenticated)."""
+            cookie = request.cookies.get(self._session_cookie_name(), "")
+            if managed is not None and isinstance(cookie, str) and cookie:
+                sid = managed.session_id_from_cookie(cookie)
+                if sid:
+                    managed.revoke_session(sid)
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True},
+                headers={"Set-Cookie": self._session_cookie("", max_age=0)},
+            )
 
         def _handle_ingest(self, request: Request) -> None:
             """Accept a push batch authenticated by a per-agent bearer token."""
@@ -899,6 +1138,7 @@ def create_server(
     enroll_device: Callable[[str, str], str] | None = None,
     list_devices: Callable[[], list[Any]] | None = None,
     revoke_device: Callable[[str], bool] | None = None,
+    auth_manager: Any | None = None,
 ) -> ThreadingHTTPServer:
     """Create a threaded HTTP server serving ``store`` over JSON + SSE.
 
@@ -908,6 +1148,8 @@ def create_server(
     ``audit`` wire the high-risk second factor and the approval audit log.
     ``enroll_device`` / ``list_devices`` / ``revoke_device`` wire pairing
     approval to the auth layer's device store (defaults fail closed).
+    ``auth_manager`` supplies the session/nonce helpers for ``/api/login`` and
+    ``/api/logout``; when omitted it is recovered from ``authenticator``.
     """
     store = store if store is not None else Store()
     handler = create_app(
@@ -918,6 +1160,7 @@ def create_server(
         enroll_device=enroll_device,
         list_devices=list_devices,
         revoke_device=revoke_device,
+        auth_manager=auth_manager,
     )
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
@@ -943,6 +1186,7 @@ __all__ = [
     "PAIRING_RATE_LIMIT",
     "PAIRING_RATE_WINDOW_SECONDS",
     "PUBLIC_PATHS",
+    "PUBLIC_STATIC_PATHS",
     "Request",
     "create_app",
     "create_server",

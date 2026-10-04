@@ -346,11 +346,16 @@ def device_lister_from_manager(manager: Any) -> Callable[..., list[dict[str, Any
 def device_revoker_from_manager(manager: Any) -> Callable[[str], bool]:
     """Build a device revoker that un-confirms a device in auth's store.
 
-    Auth's device layer refuses unconfirmed devices, so clearing ``confirmed``
-    deauthorises the device without deleting the audit trail.
+    Delegates to :meth:`~meshdispatch.auth.AuthManager.revoke_device`; auth's
+    device layer refuses unconfirmed devices, so this deauthorises the device
+    without deleting the audit trail.
     """
 
     def revoke(device_id: str) -> bool:
+        revoke_device = getattr(manager, "revoke_device", None)
+        if callable(revoke_device):
+            return bool(revoke_device(device_id))
+        # Backwards compatible with managers that predate ``revoke_device``.
         rec = manager.store.get_device(device_id)
         if rec is None:
             return False

@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>meshdispatch — sign in</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+  <main class="login" aria-labelledby="login-heading">
+    <h1 class="login__title" id="login-heading">meshdispatch</h1>
+    <p class="login__lede">Sign in to the dashboard.</p>
+
+    <div class="login__tabs" role="tablist" aria-label="Sign-in method">
+      <button class="login__tab login__tab--active" id="tab-ssh" type="button"
+              role="tab" aria-selected="true" aria-controls="panel-ssh">SSH key</button>
+      <button class="login__tab" id="tab-password" type="button"
+              role="tab" aria-selected="false" aria-controls="panel-password">Password</button>
+    </div>
+
+    <section class="login__panel" id="panel-ssh" role="tabpanel" aria-labelledby="tab-ssh">
+      <label class="field">
+        <span class="field__label">Principal</span>
+        <input class="field__control" type="text" id="ssh-principal"
+               autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      </label>
+
+      <div class="task-form__actions">
+        <button class="btn" id="ssh-challenge" type="button">Get challenge</button>
+      </div>
+
+      <div class="login__steps" id="ssh-steps" hidden>
+        <p class="field__label">1. Sign this nonce on the machine that holds your key</p>
+        <pre class="login__command" id="ssh-command"></pre>
+        <p class="note">Then paste the contents of the generated signature file below.</p>
+
+        <label class="field">
+          <span class="field__label">2. SSH signature</span>
+          <textarea class="field__control login__signature" id="ssh-signature"
+                    rows="6" autocomplete="off" spellcheck="false"
+                    placeholder="-----BEGIN SSH SIGNATURE-----"></textarea>
+        </label>
+
+        <div class="task-form__actions">
+          <button class="btn" id="ssh-submit" type="button">Sign in with key</button>
+        </div>
+      </div>
+
+      <p class="note task-form__result" id="ssh-result" hidden></p>
+    </section>
+
+    <section class="login__panel" id="panel-password" role="tabpanel" aria-labelledby="tab-password" hidden>
+      <label class="field">
+        <span class="field__label">Principal</span>
+        <input class="field__control" type="text" id="password-principal"
+               autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      </label>
+
+      <label class="field">
+        <span class="field__label">Password</span>
+        <input class="field__control" type="password" id="password-value"
+               autocomplete="current-password" required>
+      </label>
+
+      <label class="field">
+        <span class="field__label">TOTP code (if required)</span>
+        <input class="field__control" type="text" id="password-totp"
+               inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code">
+      </label>
+
+      <div class="task-form__actions">
+        <button class="btn" id="password-submit" type="button">Sign in</button>
+      </div>
+
+      <p class="note task-form__result" id="password-result" hidden></p>
+    </section>
+  </main>
+
+  <script src="/static/login.js"></script>
+</body>
+</html>

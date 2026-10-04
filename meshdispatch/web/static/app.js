@@ -34,6 +34,7 @@ const els = {
   pairingsList: document.getElementById("pairings-list"),
   pairingCount: document.getElementById("pairing-count"),
   devicesList: document.getElementById("devices-list"),
+  logoutButton: document.getElementById("logout-button"),
 };
 
 const state = {
@@ -961,8 +962,23 @@ function connectStream() {
 // bootstrap
 // ---------------------------------------------------------------------------
 
+async function logout() {
+  try {
+    await fetch("/api/logout", {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+  } catch (err) {
+    // Even if the revocation call fails, drop the user back at the login page.
+  }
+  window.location.assign("/login");
+}
+
 function init() {
   els.backButton.addEventListener("click", closeTask);
+  if (els.logoutButton) {
+    els.logoutButton.addEventListener("click", logout);
+  }
   els.taskForm.addEventListener("submit", handleFormSubmit);
   for (const radio of els.taskForm.querySelectorAll('input[name="coordination"]')) {
     radio.addEventListener("change", toggleParticipants);

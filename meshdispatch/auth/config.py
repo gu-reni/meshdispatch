@@ -60,6 +60,10 @@ class AuthConfig:
     session_ttl: int = 3600
     cookie_name: str = "meshdispatch_session"
     cookie_signing_key: str | None = None
+    #: Mark the session cookie ``Secure``.  Defaults to off because the common
+    #: deployment is a plain-HTTP LAN panel (e.g. http://192.168.1.5:8071);
+    #: turn it on when the dashboard is served over TLS.
+    cookie_secure: bool = False
 
     # SSH-signature challenge lifetime, in seconds.
     nonce_ttl: int = 120
