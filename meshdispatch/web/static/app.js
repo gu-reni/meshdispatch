@@ -11,7 +11,11 @@
  * tells us *which table* grew (not which task), so on any change we cheaply
  * refetch the list + stats and, if a task is open, its detail too.  Refreshes
  * are debounced so a burst of inserts collapses into one pass.
+ *
+ * Every user-visible string goes through the shared MDI18N table (i18n.js).
  */
+
+const t = MDI18N.t;
 
 const REFRESH_DEBOUNCE_MS = 300;
 
@@ -44,7 +48,14 @@ const state = {
   approvals: new Map(),
   pairings: new Map(),
   devices: new Map(),
+  stats: null,
+  detail: null,
+  formResult: null,
 };
+
+function msg(key, vars) {
+  return { key: key, vars: vars || null };
+}
 
 // ---------------------------------------------------------------------------
 // small helpers
@@ -77,21 +88,19 @@ async function postTask(payload) {
 }
 
 function describeError(err) {
-  if (err && err.status === 401) return "Authentication required.";
-  return "Failed to load (" + (err && err.message ? err.message : "network error") + ").";
+  if (err && err.status === 401) return t("app.err.authRequired");
+  return t("app.err.loadFailed", {
+    message: err && err.message ? err.message : "network error",
+  });
 }
 
 function describeApprovalError(err) {
-  if (err && err.status === 403) {
-    return "A valid TOTP code is required for high-risk approvals.";
-  }
-  if (err && err.status === 409) {
-    return "This approval was already decided or has expired.";
-  }
-  if (err && err.status === 404) {
-    return "This approval no longer exists.";
-  }
-  return "Failed to decide (" + (err && err.message ? err.message : "network error") + ").";
+  if (err && err.status === 403) return t("app.err.approvalTotp");
+  if (err && err.status === 409) return t("app.err.approvalDecided");
+  if (err && err.status === 404) return t("app.err.approvalMissing");
+  return t("app.err.decideFailed", {
+    message: err && err.message ? err.message : "network error",
+  });
 }
 
 function el(tag, className, text) {
@@ -113,7 +122,7 @@ function fmtTime(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString();
+  return d.toLocaleString(MDI18N.locale());
 }
 
 function fmtDuration(startIso, endIso) {
@@ -123,12 +132,12 @@ function fmtDuration(startIso, endIso) {
   const end = endIso ? new Date(endIso).getTime() : Date.now();
   if (Number.isNaN(end)) return "—";
   let secs = Math.max(0, Math.round((end - start) / 1000));
-  if (secs < 60) return secs + "s";
+  if (secs < 60) return secs + t("unit.second");
   const mins = Math.floor(secs / 60);
   secs = secs % 60;
-  if (mins < 60) return mins + "m " + secs + "s";
+  if (mins < 60) return mins + t("unit.minute") + " " + secs + t("unit.second");
   const hours = Math.floor(mins / 60);
-  return hours + "h " + (mins % 60) + "m";
+  return hours + t("unit.hour") + " " + (mins % 60) + t("unit.minute");
 }
 
 function remainingMs(expiresIso) {
@@ -140,18 +149,34 @@ function remainingMs(expiresIso) {
 
 function fmtRemaining(expiresIso) {
   const ms = remainingMs(expiresIso);
-  if (ms <= 0) return "expired";
+  if (ms <= 0) return t("status.expired");
   let secs = Math.floor(ms / 1000);
-  if (secs < 60) return secs + "s";
+  if (secs < 60) return secs + t("unit.second");
   const mins = Math.floor(secs / 60);
   secs = secs % 60;
-  if (mins < 60) return mins + "m " + secs + "s";
+  if (mins < 60) return mins + t("unit.minute") + " " + secs + t("unit.second");
   const hours = Math.floor(mins / 60);
-  return hours + "h " + (mins % 60) + "m";
+  return hours + t("unit.hour") + " " + (mins % 60) + t("unit.minute");
+}
+
+// Enum values arrive from the API as stable English literals; translate the
+// known ones and fall back to the raw value so an unknown status still shows.
+function enumLabel(prefix, value) {
+  const key = prefix + "." + value;
+  const label = MDI18N.t(key);
+  return label === key ? value : label;
+}
+
+function statusLabel(value) {
+  return enumLabel("status", value);
+}
+
+function originLabel(value) {
+  return enumLabel("origin", value);
 }
 
 function badge(status) {
-  const node = el("span", "badge", status);
+  const node = el("span", "badge", statusLabel(status));
   node.dataset.status = status;
   return node;
 }
@@ -173,7 +198,7 @@ function field(dl, label, value) {
 }
 
 function modeLabel(coordination) {
-  return coordination === "multi" ? "multi-agent" : "single-agent";
+  return coordination === "multi" ? t("mode.multi") : t("mode.single");
 }
 
 function taskDuration(runs) {
@@ -200,19 +225,25 @@ function taskDuration(runs) {
 function renderStats(stats) {
   const nav = els.stats;
   nav.textContent = "";
-  nav.append(statGroup("origin", stats.by_origin), statGroup("status", stats.by_status));
+  nav.append(
+    statGroup(t("app.stats.origin"), stats.by_origin, originLabel),
+    statGroup(t("app.stats.status"), stats.by_status, statusLabel)
+  );
 }
 
-function statGroup(label, counts) {
+function statGroup(label, counts, labeler) {
   const group = el("div", "stats__group");
   group.append(el("span", "stats__label", label));
   const keys = Object.keys(counts || {}).sort();
   if (keys.length === 0) {
-    group.append(el("span", "stats__empty", "none"));
+    group.append(el("span", "stats__empty", t("app.stats.none")));
   } else {
     for (const key of keys) {
       const chip = el("span", "stats__chip");
-      chip.append(el("span", "stats__chip-name", key), el("span", "stats__chip-count", String(counts[key])));
+      chip.append(
+        el("span", "stats__chip-name", labeler ? labeler(key) : key),
+        el("span", "stats__chip-count", String(counts[key]))
+      );
       group.append(chip);
     }
   }
@@ -234,11 +265,11 @@ function buildTaskRow(task) {
 
   const meta = el("div", "task-row__meta");
   meta.append(
-    metaItem("id", task.id),
-    metaItem("created", fmtTime(task.created_at)),
-    metaItem("last run", fmtTime(task.last_run_at)),
-    metaItem("agent", task.assignee || "—"),
-    metaItem("mode", modeLabel(task.coordination))
+    metaItem(t("app.meta.id"), task.id),
+    metaItem(t("app.meta.created"), fmtTime(task.created_at)),
+    metaItem(t("app.meta.lastRun"), fmtTime(task.last_run_at)),
+    metaItem(t("app.meta.agent"), task.assignee || "—"),
+    metaItem(t("app.meta.mode"), modeLabel(task.coordination))
   );
 
   row.append(head, meta);
@@ -253,7 +284,7 @@ function renderTaskList() {
   );
   els.taskCount.textContent = String(tasks.length);
   if (tasks.length === 0) {
-    list.append(emptyNote("No tasks recorded yet."));
+    list.append(emptyNote(t("app.tasks.empty")));
     return;
   }
   for (const task of tasks) {
@@ -278,15 +309,15 @@ function buildDetailHeader(task, runs) {
   titleRow.append(badge(task.status), el("h2", "detail__title", task.title));
 
   const fields = el("dl", "detail__fields");
-  field(fields, "ID", task.id);
-  field(fields, "Mode", modeLabel(task.coordination));
-  field(fields, "Status", task.status);
-  field(fields, "Duration", taskDuration(runs));
-  field(fields, "Result", task.result || "—");
-  field(fields, "Origin", task.origin);
-  field(fields, "Agent", task.assignee || "—");
-  field(fields, "Created", fmtTime(task.created_at));
-  field(fields, "Last run", fmtTime(task.last_run_at));
+  field(fields, t("app.field.id"), task.id);
+  field(fields, t("app.field.mode"), modeLabel(task.coordination));
+  field(fields, t("app.field.status"), statusLabel(task.status));
+  field(fields, t("app.field.duration"), taskDuration(runs));
+  field(fields, t("app.field.result"), task.result || "—");
+  field(fields, t("app.field.origin"), originLabel(task.origin));
+  field(fields, t("app.field.agent"), task.assignee || "—");
+  field(fields, t("app.field.created"), fmtTime(task.created_at));
+  field(fields, t("app.field.lastRun"), fmtTime(task.last_run_at));
 
   header.append(titleRow, fields);
   return header;
@@ -313,7 +344,13 @@ function buildMessage(msg) {
 
 function buildConversation(messages, coordination) {
   const section = el("section", "detail__section");
-  section.append(el("h3", "detail__section-title", coordination === "multi" ? "Conversation" : "Messages"));
+  section.append(
+    el(
+      "h3",
+      "detail__section-title",
+      coordination === "multi" ? t("app.section.conversation") : t("app.section.messages")
+    )
+  );
 
   const ordered = messages
     .slice()
@@ -331,27 +368,27 @@ function buildRun(run) {
   const card = el("div", "run");
 
   const head = el("div", "run__head");
-  head.append(badge(run.status), el("span", "run__agent", run.agent || "(no agent)"));
+  head.append(badge(run.status), el("span", "run__agent", run.agent || t("app.run.noAgent")));
 
   const meta = el("div", "run__meta");
   meta.append(
-    metaItem("started", fmtTime(run.started_at)),
-    metaItem("ended", fmtTime(run.ended_at)),
-    metaItem("duration", fmtDuration(run.started_at, run.ended_at))
+    metaItem(t("app.meta.started"), fmtTime(run.started_at)),
+    metaItem(t("app.meta.ended"), fmtTime(run.ended_at)),
+    metaItem(t("app.meta.duration"), fmtDuration(run.started_at, run.ended_at))
   );
 
   card.append(head, meta);
-  if (run.outcome) card.append(kvBlock("Outcome", run.outcome));
-  if (run.summary) card.append(kvBlock("Summary", run.summary));
-  if (run.error_type) card.append(kvBlock("Error", run.error_type));
+  if (run.outcome) card.append(kvBlock(t("app.run.outcome"), run.outcome));
+  if (run.summary) card.append(kvBlock(t("app.run.summary"), run.summary));
+  if (run.error_type) card.append(kvBlock(t("app.run.error"), run.error_type));
   return card;
 }
 
 function buildRuns(runs) {
   const section = el("section", "detail__section");
-  section.append(el("h3", "detail__section-title", "Runs"));
+  section.append(el("h3", "detail__section-title", t("app.section.runs")));
   if (runs.length === 0) {
-    section.append(emptyNote("No runs recorded."));
+    section.append(emptyNote(t("app.runs.empty")));
     return section;
   }
   const list = el("div", "runs");
@@ -411,20 +448,20 @@ function buildApprovalCard(approval) {
 
   const meta = el("div", "approval__meta");
   meta.append(
-    metaItem("task", approval.task_id),
-    metaItem("requested", fmtTime(approval.requested_at)),
-    metaItem("time left", fmtRemaining(approval.expires_at))
+    metaItem(t("app.meta.task"), approval.task_id),
+    metaItem(t("app.meta.requested"), fmtTime(approval.requested_at)),
+    metaItem(t("app.meta.timeLeft"), fmtRemaining(approval.expires_at))
   );
 
   const command = el("div", "approval__command");
-  command.append(el("span", "approval__command-label", "command"));
+  command.append(el("span", "approval__command-label", t("app.approval.command")));
   const commandValue = el("code", "approval__command-value", approval.command);
   command.append(commandValue);
 
   card.append(head, meta, command);
 
-  if (approval.purpose) card.append(kvBlock("Purpose", approval.purpose));
-  if (approval.impact) card.append(kvBlock("Impact", approval.impact));
+  if (approval.purpose) card.append(kvBlock(t("app.approval.purpose"), approval.purpose));
+  if (approval.impact) card.append(kvBlock(t("app.approval.impact"), approval.impact));
 
   const highRisk = approval.risk === "high";
   const expired = remainingMs(approval.expires_at) <= 0;
@@ -432,21 +469,21 @@ function buildApprovalCard(approval) {
   let totpInput = null;
   if (highRisk) {
     const totpField = el("label", "approval__totp-field");
-    totpField.append(el("span", "approval__totp-label", "TOTP code (required)"));
+    totpField.append(el("span", "approval__totp-label", t("app.approval.totp")));
     totpInput = document.createElement("input");
     totpInput.type = "text";
     totpInput.inputMode = "numeric";
     totpInput.autocomplete = "one-time-code";
     totpInput.className = "approval__totp";
-    totpInput.placeholder = "6-digit code";
+    totpInput.placeholder = t("app.totpPlaceholder");
     totpField.append(totpInput);
     card.append(totpField);
   }
 
   const actions = el("div", "approval__actions");
-  const approveBtn = el("button", "btn btn--approve", "Approve");
+  const approveBtn = el("button", "btn btn--approve", t("app.approve"));
   approveBtn.type = "button";
-  const rejectBtn = el("button", "btn btn--reject", "Reject");
+  const rejectBtn = el("button", "btn btn--reject", t("app.reject"));
   rejectBtn.type = "button";
   approveBtn.disabled = expired;
   rejectBtn.disabled = expired;
@@ -457,11 +494,11 @@ function buildApprovalCard(approval) {
 
   function handleDecision(decision) {
     result.hidden = false;
-    result.textContent = "Submitting…";
+    result.textContent = t("app.submitting");
     result.classList.remove("note--error", "note--success");
     decideApproval(approval.id, decision, totpInput ? totpInput.value.trim() : "")
       .then((updated) => {
-        result.textContent = "Decision recorded: " + updated.status + ".";
+        result.textContent = t("app.approval.recorded", { status: statusLabel(updated.status) });
         result.classList.remove("note--error");
         result.classList.add("note--success");
         loadApprovals();
@@ -478,7 +515,7 @@ function buildApprovalCard(approval) {
   rejectBtn.addEventListener("click", () => handleDecision("reject"));
 
   if (expired) {
-    card.append(el("p", "note note--error", "This request has expired."));
+    card.append(el("p", "note note--error", t("app.request.expired")));
   }
 
   card.append(actions, result);
@@ -494,7 +531,7 @@ function renderApprovals() {
   els.approvalCount.textContent = String(pending.length);
 
   if (pending.length === 0) {
-    list.append(emptyNote("No pending approvals."));
+    list.append(emptyNote(t("app.approvals.empty")));
     return;
   }
 
@@ -521,16 +558,12 @@ async function loadApprovals() {
 // ---------------------------------------------------------------------------
 
 function describePairingError(err) {
-  if (err && err.status === 403) {
-    return "A valid TOTP code is required to approve or reject a pairing.";
-  }
-  if (err && err.status === 409) {
-    return "This pairing was already decided or has expired.";
-  }
-  if (err && err.status === 404) {
-    return "This pairing no longer exists.";
-  }
-  return "Failed to decide (" + (err && err.message ? err.message : "network error") + ").";
+  if (err && err.status === 403) return t("app.err.pairingTotp");
+  if (err && err.status === 409) return t("app.err.pairingDecided");
+  if (err && err.status === 404) return t("app.err.pairingMissing");
+  return t("app.err.decideFailed", {
+    message: err && err.message ? err.message : "network error",
+  });
 }
 
 async function decidePairing(id, decision, totp) {
@@ -578,37 +611,37 @@ function buildPairingCard(pairing) {
 
   const meta = el("div", "pairing__meta");
   meta.append(
-    metaItem("fingerprint", pairing.key_fingerprint),
-    metaItem("time left", fmtRemaining(pairing.expires_at))
+    metaItem(t("app.meta.fingerprint"), pairing.key_fingerprint),
+    metaItem(t("app.meta.timeLeft"), fmtRemaining(pairing.expires_at))
   );
 
   card.append(head, meta);
 
   const codeBlock = el("div", "pairing__code");
-  codeBlock.append(el("span", "pairing__code-label", "pairing code"));
+  codeBlock.append(el("span", "pairing__code-label", t("app.pairing.code")));
   codeBlock.append(
     el("span", "pairing__code-value", pairing.code || "—"),
-    el("span", "pairing__code-hint", "compare with what the machine shows")
+    el("span", "pairing__code-hint", t("app.pairing.codeHint"))
   );
   card.append(codeBlock);
 
   const expired = remainingMs(pairing.expires_at) <= 0;
 
   const totpField = el("label", "pairing__totp-field");
-  totpField.append(el("span", "pairing__totp-label", "TOTP code (required)"));
+  totpField.append(el("span", "pairing__totp-label", t("app.approval.totp")));
   const totpInput = document.createElement("input");
   totpInput.type = "text";
   totpInput.inputMode = "numeric";
   totpInput.autocomplete = "one-time-code";
   totpInput.className = "pairing__totp";
-  totpInput.placeholder = "6-digit code";
+  totpInput.placeholder = t("app.totpPlaceholder");
   totpField.append(totpInput);
   card.append(totpField);
 
   const actions = el("div", "pairing__actions");
-  const approveBtn = el("button", "btn btn--approve", "Approve");
+  const approveBtn = el("button", "btn btn--approve", t("app.approve"));
   approveBtn.type = "button";
-  const rejectBtn = el("button", "btn btn--reject", "Reject");
+  const rejectBtn = el("button", "btn btn--reject", t("app.reject"));
   rejectBtn.type = "button";
   approveBtn.disabled = expired;
   rejectBtn.disabled = expired;
@@ -619,11 +652,11 @@ function buildPairingCard(pairing) {
 
   function handleDecision(decision) {
     result.hidden = false;
-    result.textContent = "Submitting…";
+    result.textContent = t("app.submitting");
     result.classList.remove("note--error", "note--success");
     decidePairing(pairing.id, decision, totpInput.value.trim())
       .then((updated) => {
-        result.textContent = "Pairing " + updated.status + ".";
+        result.textContent = t("app.pairing.result", { status: statusLabel(updated.status) });
         result.classList.remove("note--error");
         result.classList.add("note--success");
         loadPairings();
@@ -641,7 +674,7 @@ function buildPairingCard(pairing) {
   rejectBtn.addEventListener("click", () => handleDecision("reject"));
 
   if (expired) {
-    card.append(el("p", "note note--error", "This request has expired."));
+    card.append(el("p", "note note--error", t("app.request.expired")));
   }
 
   card.append(actions, result);
@@ -657,7 +690,7 @@ function renderPairings() {
   els.pairingCount.textContent = String(pending.length);
 
   if (pending.length === 0) {
-    list.append(emptyNote("No pending pairing requests."));
+    list.append(emptyNote(t("app.pairings.empty")));
     return;
   }
 
@@ -672,21 +705,21 @@ function buildDeviceRow(device) {
 
   const head = el("div", "device__head");
   head.append(
-    el("span", "device__name", device.device_name || "(unnamed)"),
+    el("span", "device__name", device.device_name || t("app.device.unnamed")),
     badge(device.confirmed ? "approved" : "revoked")
   );
 
   const meta = el("div", "device__meta");
   meta.append(
-    metaItem("id", device.device_id),
-    metaItem("principal", device.principal || "—"),
-    metaItem("created", fmtTime(device.created_at))
+    metaItem(t("app.meta.id"), device.device_id),
+    metaItem(t("app.meta.principal"), device.principal || "—"),
+    metaItem(t("app.meta.created"), fmtTime(device.created_at))
   );
 
   row.append(head, meta);
 
   const actions = el("div", "device__actions");
-  const revokeBtn = el("button", "btn btn--reject", "Revoke");
+  const revokeBtn = el("button", "btn btn--reject", t("app.device.revoke"));
   revokeBtn.type = "button";
   revokeBtn.disabled = !device.confirmed;
   actions.append(revokeBtn);
@@ -697,17 +730,17 @@ function buildDeviceRow(device) {
 
   revokeBtn.addEventListener("click", () => {
     result.hidden = false;
-    result.textContent = "Revoking…";
+    result.textContent = t("app.device.revoking");
     result.classList.remove("note--error", "note--success");
     revokeDevice(device.device_id)
       .then(() => {
-        result.textContent = "Device revoked.";
+        result.textContent = t("app.device.revoked");
         result.classList.remove("note--error");
         result.classList.add("note--success");
         loadDevices();
       })
       .catch((err) => {
-        result.textContent = "Failed to revoke (" + err.message + ").";
+        result.textContent = t("app.device.revokeFailed", { message: err.message });
         result.classList.remove("note--success");
         result.classList.add("note--error");
       });
@@ -724,7 +757,7 @@ function renderDevices() {
     (a.created_at || "").localeCompare(b.created_at || "")
   );
   if (devices.length === 0) {
-    list.append(emptyNote("No authorised devices."));
+    list.append(emptyNote(t("app.devices.empty")));
     return;
   }
   for (const device of devices) {
@@ -760,13 +793,13 @@ async function loadDevices() {
 // ---------------------------------------------------------------------------
 
 function agentLabel(agent) {
-  return agent.enabled ? agent.name : agent.name + " (disabled)";
+  return agent.enabled ? agent.name : t("app.agent.disabled", { name: agent.name });
 }
 
 function renderAgentOptions() {
   const assignee = els.taskAssignee;
   assignee.textContent = "";
-  const placeholder = el("option", null, "Choose an agent…");
+  const placeholder = el("option", null, t("app.form.chooseAgent"));
   placeholder.value = "";
   assignee.append(placeholder);
 
@@ -777,7 +810,7 @@ function renderAgentOptions() {
     a.name.localeCompare(b.name)
   );
   if (agents.length === 0) {
-    participants.append(emptyNote("No agents registered yet."));
+    participants.append(emptyNote(t("app.form.noAgents")));
   }
 
   for (const agent of agents) {
@@ -823,12 +856,25 @@ function toggleParticipants() {
   els.participantsField.hidden = coordinationMode() !== "multi";
 }
 
-function showFormResult(message, isError) {
+function renderFormResult() {
   const result = els.taskFormResult;
+  const current = state.formResult;
+  if (!current) return;
   result.hidden = false;
-  result.textContent = message;
-  result.classList.toggle("note--error", isError);
-  result.classList.toggle("note--success", !isError);
+  result.textContent =
+    current.text !== undefined ? current.text : t(current.key, current.vars);
+  result.classList.toggle("note--error", current.isError);
+  result.classList.toggle("note--success", !current.isError);
+}
+
+function showFormResult(descriptor, isError) {
+  state.formResult = {
+    key: descriptor.key,
+    vars: descriptor.vars,
+    text: descriptor.text,
+    isError: isError,
+  };
+  renderFormResult();
 }
 
 async function handleFormSubmit(event) {
@@ -843,12 +889,12 @@ async function handleFormSubmit(event) {
     payload.participants = selectedParticipants();
   }
 
-  showFormResult("Dispatching…", false);
+  showFormResult(msg("app.form.dispatching"), false);
   try {
     const data = await postTask(payload);
     const task = data.task;
     showFormResult(
-      "Created task " + task.id + " (status: " + task.status + ").",
+      msg("app.form.created", { id: task.id, status: statusLabel(task.status) }),
       false
     );
     els.taskForm.reset();
@@ -858,7 +904,7 @@ async function handleFormSubmit(event) {
     await loadStats();
   } catch (err) {
     showFormResult(
-      err && err.message ? err.message : "Failed to dispatch task.",
+      { text: err && err.message ? err.message : t("app.form.failed") },
       true
     );
   }
@@ -870,8 +916,10 @@ async function handleFormSubmit(event) {
 
 async function loadStats() {
   try {
-    renderStats(await api("/api/stats"));
+    state.stats = await api("/api/stats");
+    renderStats(state.stats);
   } catch (err) {
+    state.stats = null;
     els.stats.textContent = "";
     els.stats.append(errorNote(err));
   }
@@ -896,8 +944,10 @@ async function loadTasks() {
 async function loadDetail(taskId) {
   try {
     const detail = await api("/api/tasks/" + encodeURIComponent(taskId));
+    state.detail = detail;
     renderDetail(detail);
   } catch (err) {
+    state.detail = null;
     els.taskDetail.textContent = "";
     els.taskDetail.append(errorNote(err));
   }
@@ -912,6 +962,7 @@ function openTask(taskId) {
 
 function closeTask() {
   state.selectedTaskId = null;
+  state.detail = null;
   document.body.classList.remove("detail-open");
   renderTaskList();
 }
@@ -941,7 +992,21 @@ async function refresh() {
 
 function setStreamState(value) {
   els.streamState.dataset.state = value;
-  els.streamState.textContent = value;
+  els.streamState.textContent = t("app.stream." + value);
+}
+
+// Re-render everything that is built from state when the language changes, so
+// the whole screen flips at once instead of leaving stale English behind.
+function rerenderForLanguage() {
+  if (state.stats) renderStats(state.stats);
+  renderTaskList();
+  if (state.detail) renderDetail(state.detail);
+  renderApprovals();
+  renderPairings();
+  renderDevices();
+  renderAgentOptions();
+  renderFormResult();
+  setStreamState(els.streamState.dataset.state);
 }
 
 function connectStream() {
@@ -975,6 +1040,9 @@ async function logout() {
 }
 
 function init() {
+  MDI18N.apply();
+  MDI18N.syncToggles();
+  MDI18N.onChange(rerenderForLanguage);
   els.backButton.addEventListener("click", closeTask);
   if (els.logoutButton) {
     els.logoutButton.addEventListener("click", logout);

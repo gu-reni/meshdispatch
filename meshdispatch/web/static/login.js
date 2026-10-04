@@ -6,7 +6,11 @@
  * All dynamic values (the nonce, server error messages) reach the page through
  * `textContent` only; nothing is ever assigned to `innerHTML`.  Passwords and
  * signatures are sent in the request body and are never logged or rendered.
+ *
+ * Every user-visible string goes through the shared MDI18N table (i18n.js).
  */
+
+const t = MDI18N.t;
 
 const els = {
   tabSsh: document.getElementById("tab-ssh"),
@@ -29,12 +33,36 @@ const els = {
 
 let currentNonce = null;
 
-function setResult(node, message, isError) {
-  node.textContent = message;
-  node.className = isError
+// Each result line remembers the *key* (not the rendered text) so it can be
+// re-rendered in the new language the moment the toggle changes.
+const resultStates = new Map();
+
+function msg(key, vars) {
+  return { key: key, vars: vars || null };
+}
+
+function renderResult(node) {
+  const state = resultStates.get(node);
+  if (!state) return;
+  node.textContent = t(state.key, state.vars);
+  node.className = state.isError
     ? "note note--error task-form__result"
     : "note note--success task-form__result";
   node.hidden = false;
+}
+
+function setResult(node, descriptor, isError) {
+  resultStates.set(node, { key: descriptor.key, vars: descriptor.vars, isError: isError });
+  renderResult(node);
+}
+
+function clearResult(node) {
+  resultStates.delete(node);
+  node.hidden = true;
+}
+
+function refreshMessages() {
+  for (const node of resultStates.keys()) renderResult(node);
 }
 
 function selectTab(which) {
@@ -63,11 +91,11 @@ async function postLogin(payload) {
 }
 
 function loginError(result) {
-  if (result.status === 401) return "Sign-in failed. Check your credentials and try again.";
-  if (result.status === 403) return "A valid TOTP code is required.";
-  if (result.status === 400) return "The request was rejected. Check the fields and try again.";
-  if (result.status === 501) return "Login is not configured on this server.";
-  return "Sign-in failed (HTTP " + result.status + ").";
+  if (result.status === 401) return msg("login.err.unauthorized");
+  if (result.status === 403) return msg("login.err.totp");
+  if (result.status === 400) return msg("login.err.badRequest");
+  if (result.status === 501) return msg("login.err.notConfigured");
+  return msg("login.err.http", { status: result.status });
 }
 
 function succeed() {
@@ -84,11 +112,11 @@ function commandFor(nonce, namespace) {
 async function requestChallenge() {
   const principal = els.sshPrincipal.value.trim();
   if (!principal) {
-    setResult(els.sshResult, "Enter your principal first.", true);
+    setResult(els.sshResult, msg("login.err.principalFirst"), true);
     return;
   }
   els.sshChallenge.disabled = true;
-  setResult(els.sshResult, "Requesting challenge…", false);
+  setResult(els.sshResult, msg("login.ssh.requesting"), false);
   try {
     const result = await postLogin({
       method: "ssh",
@@ -103,9 +131,9 @@ async function requestChallenge() {
     const namespace = result.data.namespace || "meshdispatch";
     els.sshCommand.textContent = commandFor(currentNonce, namespace);
     els.sshSteps.hidden = false;
-    els.sshResult.hidden = true;
+    clearResult(els.sshResult);
   } catch (err) {
-    setResult(els.sshResult, "Could not reach the server.", true);
+    setResult(els.sshResult, msg("login.err.server"), true);
   } finally {
     els.sshChallenge.disabled = false;
   }
@@ -115,15 +143,15 @@ async function submitSsh() {
   const principal = els.sshPrincipal.value.trim();
   const signature = els.sshSignature.value.trim();
   if (!principal || !currentNonce) {
-    setResult(els.sshResult, "Request a fresh challenge first.", true);
+    setResult(els.sshResult, msg("login.err.freshChallenge"), true);
     return;
   }
   if (!signature) {
-    setResult(els.sshResult, "Paste the signature produced by ssh-keygen.", true);
+    setResult(els.sshResult, msg("login.err.pasteSignature"), true);
     return;
   }
   els.sshSubmit.disabled = true;
-  setResult(els.sshResult, "Verifying signature…", false);
+  setResult(els.sshResult, msg("login.ssh.verifying"), false);
   try {
     const result = await postLogin({
       method: "ssh",
@@ -137,7 +165,7 @@ async function submitSsh() {
     }
     setResult(els.sshResult, loginError(result), true);
   } catch (err) {
-    setResult(els.sshResult, "Could not reach the server.", true);
+    setResult(els.sshResult, msg("login.err.server"), true);
   } finally {
     els.sshSubmit.disabled = false;
   }
@@ -147,11 +175,11 @@ async function submitPassword() {
   const principal = els.passwordPrincipal.value.trim();
   const password = els.passwordValue.value;
   if (!principal || !password) {
-    setResult(els.passwordResult, "Enter your principal and password.", true);
+    setResult(els.passwordResult, msg("login.err.credentials"), true);
     return;
   }
   els.passwordSubmit.disabled = true;
-  setResult(els.passwordResult, "Signing in…", false);
+  setResult(els.passwordResult, msg("login.password.signingIn"), false);
   try {
     const result = await postLogin({
       method: "password",
@@ -165,13 +193,16 @@ async function submitPassword() {
     }
     setResult(els.passwordResult, loginError(result), true);
   } catch (err) {
-    setResult(els.passwordResult, "Could not reach the server.", true);
+    setResult(els.passwordResult, msg("login.err.server"), true);
   } finally {
     els.passwordSubmit.disabled = false;
   }
 }
 
 function init() {
+  MDI18N.apply();
+  MDI18N.syncToggles();
+  MDI18N.onChange(refreshMessages);
   els.tabSsh.addEventListener("click", () => selectTab("ssh"));
   els.tabPassword.addEventListener("click", () => selectTab("password"));
   els.sshChallenge.addEventListener("click", requestChallenge);

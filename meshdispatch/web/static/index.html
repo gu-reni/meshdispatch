@@ -5,73 +5,86 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>meshdispatch</title>
   <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/i18n.js"></script>
 </head>
 <body>
   <header class="topbar">
     <div class="topbar__brand">
       <span class="topbar__title">meshdispatch</span>
-      <span class="topbar__state" id="stream-state" data-state="connecting">connecting</span>
+      <span class="topbar__state" id="stream-state" data-state="connecting"
+            data-i18n="app.stream.connecting">connecting</span>
     </div>
-    <div class="topbar__stats" id="stats" aria-label="Counts by origin and status"></div>
-    <button class="topbar__logout" id="logout-button" type="button">Sign out</button>
+    <div class="topbar__stats" id="stats" aria-label="Counts by origin and status"
+         data-i18n-aria-label="app.stats.label"></div>
+    <div class="topbar__actions">
+      <div class="lang-toggle" role="group" aria-label="Language"
+           data-i18n-aria-label="common.language">
+        <button class="lang-toggle__btn" type="button" data-lang-value="zh"
+                data-i18n="lang.zh">中文</button>
+        <button class="lang-toggle__btn" type="button" data-lang-value="en"
+                data-i18n="lang.en">English</button>
+      </div>
+      <button class="topbar__logout" id="logout-button" type="button"
+              data-i18n="app.signOut">Sign out</button>
+    </div>
   </header>
 
   <main class="layout">
     <section class="pane pane--approvals" id="approvals-pane" aria-labelledby="approvals-heading">
-      <h2 class="pane__heading" id="approvals-heading">Pending approvals <span class="task-list__count" id="approval-count"></span></h2>
+      <h2 class="pane__heading" id="approvals-heading"><span data-i18n="app.pendingApprovals">Pending approvals</span> <span class="task-list__count" id="approval-count"></span></h2>
       <div class="approvals" id="approvals-list"></div>
     </section>
 
     <section class="pane pane--devices" id="devices-pane" aria-labelledby="devices-heading">
-      <h2 class="pane__heading" id="devices-heading">Devices &amp; pairing <span class="task-list__count" id="pairing-count"></span></h2>
+      <h2 class="pane__heading" id="devices-heading"><span data-i18n="app.devicesPairing">Devices &amp; pairing</span> <span class="task-list__count" id="pairing-count"></span></h2>
 
-      <h3 class="devices__subheading">Pending pairing requests</h3>
+      <h3 class="devices__subheading" data-i18n="app.pendingPairings">Pending pairing requests</h3>
       <div class="pairings" id="pairings-list"></div>
 
-      <h3 class="devices__subheading">Authorised devices</h3>
+      <h3 class="devices__subheading" data-i18n="app.authorisedDevices">Authorised devices</h3>
       <div class="devices" id="devices-list"></div>
     </section>
 
     <section class="pane pane--list" id="task-list-pane" aria-labelledby="task-list-heading">
-      <h2 class="pane__heading" id="task-list-heading">Tasks <span class="task-list__count" id="task-count"></span></h2>
+      <h2 class="pane__heading" id="task-list-heading"><span data-i18n="app.tasks">Tasks</span> <span class="task-list__count" id="task-count"></span></h2>
 
       <form class="task-form" id="task-form" autocomplete="off">
         <label class="field">
-          <span class="field__label">Title</span>
+          <span class="field__label" data-i18n="app.form.title">Title</span>
           <input class="field__control" type="text" id="task-title" name="title" required>
         </label>
 
         <label class="field">
-          <span class="field__label">Description</span>
+          <span class="field__label" data-i18n="app.form.description">Description</span>
           <textarea class="field__control" id="task-body" name="body" rows="3"></textarea>
         </label>
 
         <label class="field">
-          <span class="field__label">Assignee</span>
+          <span class="field__label" data-i18n="app.form.assignee">Assignee</span>
           <select class="field__control" id="task-assignee" name="assignee" required></select>
         </label>
 
         <fieldset class="field">
-          <legend class="field__label">Coordination</legend>
+          <legend class="field__label" data-i18n="app.form.coordination">Coordination</legend>
           <div class="field__choice-row">
             <label class="choice">
               <input type="radio" name="coordination" value="single" checked>
-              <span>Single-agent</span>
+              <span data-i18n="app.form.single">Single-agent</span>
             </label>
             <label class="choice">
               <input type="radio" name="coordination" value="multi">
-              <span>Multi-agent</span>
+              <span data-i18n="app.form.multi">Multi-agent</span>
             </label>
           </div>
         </fieldset>
 
         <fieldset class="field" id="participants-field" hidden>
-          <legend class="field__label">Participants</legend>
+          <legend class="field__label" data-i18n="app.form.participants">Participants</legend>
           <div class="participants" id="participants-list"></div>
         </fieldset>
 
         <div class="task-form__actions">
-          <button class="btn" type="submit">Create task</button>
+          <button class="btn" type="submit" data-i18n="app.form.create">Create task</button>
         </div>
 
         <p class="note task-form__result" id="task-form-result" hidden></p>
@@ -81,8 +94,9 @@
     </section>
 
     <section class="pane pane--detail" id="task-detail-pane" aria-labelledby="task-detail-heading">
-      <button class="detail__back" id="detail-back" type="button">← Back to tasks</button>
-      <h2 class="pane__heading sr-only" id="task-detail-heading">Task detail</h2>
+      <button class="detail__back" id="detail-back" type="button"
+              data-i18n="app.backToTasks">← Back to tasks</button>
+      <h2 class="pane__heading sr-only" id="task-detail-heading" data-i18n="app.taskDetail">Task detail</h2>
       <div id="task-detail"></div>
     </section>
   </main>

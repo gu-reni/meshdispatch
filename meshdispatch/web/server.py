@@ -58,11 +58,13 @@ except ImportError:  # pragma: no cover - auth lands later in phase 3
 PUBLIC_PATHS = frozenset({"/api/login", "/login"})
 
 #: Static assets that may be fetched without a session.  This is the login
-#: page's own assets and nothing more: the shared stylesheet and the login
-#: script (neither carries data or secrets).  ``/index.html`` and ``app.js``
-#: remain behind the gate, so the dashboard itself is never reachable without a
-#: session.
-PUBLIC_STATIC_PATHS = frozenset({"/static/style.css", "/static/login.js"})
+#: page's own assets and nothing more: the shared stylesheet, the login script,
+#: and the shared string table (none carries data or secrets).  ``/index.html``
+#: and ``app.js`` remain behind the gate, so the dashboard itself is never
+#: reachable without a session.
+PUBLIC_STATIC_PATHS = frozenset(
+    {"/static/style.css", "/static/login.js", "/static/i18n.js"}
+)
 
 #: Fallback session cookie name when no auth manager config is available.
 DEFAULT_COOKIE_NAME = "meshdispatch_session"

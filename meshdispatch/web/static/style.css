@@ -149,6 +149,53 @@ body {
   border-color: #dbe4ff;
 }
 
+.topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   language toggle (shared by the login page and the top bar)
+--------------------------------------------------------------------------- */
+
+.lang-toggle {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.lang-toggle__btn {
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--muted);
+  background: var(--panel);
+  border: none;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+}
+
+.lang-toggle__btn + .lang-toggle__btn {
+  border-left: 1px solid var(--border);
+}
+
+.lang-toggle__btn:hover {
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.lang-toggle__btn.is-active,
+.lang-toggle__btn.is-active:hover {
+  color: #fff;
+  background: var(--accent);
+}
+
 /* ---------------------------------------------------------------------------
    layout
 --------------------------------------------------------------------------- */
@@ -1018,6 +1065,12 @@ textarea.field__control {
   border-radius: 12px;
   box-shadow: var(--shadow);
   min-width: 0;
+}
+
+.login__top {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.5rem;
 }
 
 .login__title {
