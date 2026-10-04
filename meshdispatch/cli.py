@@ -175,6 +175,26 @@ def build_parser() -> argparse.ArgumentParser:
     trevoke.add_argument("id", help="token id")
     trevoke.add_argument("--json", action="store_true")
 
+    auth = sub.add_parser("auth", help="Manage a principal's login credentials")
+    authsub = auth.add_subparsers(dest="auth_command", required=True)
+    aset = authsub.add_parser(
+        "set-password", help="Set a principal's password (prompted, never echoed)"
+    )
+    aset.add_argument(
+        "--principal",
+        default=None,
+        help="principal to set the password for (default: $MESHDISPATCH_PRINCIPAL)",
+    )
+    aset.add_argument(
+        "--state-dir",
+        default=None,
+        help="auth state directory (default: the standard location)",
+    )
+    acheck = authsub.add_parser(
+        "check", help="Report which login methods are configured for a principal"
+    )
+    acheck.add_argument("--principal", default=None)
+
     device = sub.add_parser("device", help="Pair a machine with this panel")
     devicesub = device.add_subparsers(dest="device_command", required=True)
 
@@ -664,11 +684,95 @@ def _dispatch(args: argparse.Namespace, store: Store) -> int:
         print(f"error: unknown token command {args.token_command}", file=sys.stderr)
         return 2
 
+    if cmd == "auth":
+        return _auth_dispatch(args)
     if cmd == "device":
         return _device_dispatch(args)
 
     print(f"error: unknown command {cmd}", file=sys.stderr)
     return 2
+
+
+def _auth_dispatch(args: argparse.Namespace) -> int:
+    if args.auth_command == "set-password":
+        return _auth_set_password(args)
+    if args.auth_command == "check":
+        return _auth_check(args)
+    print(f"error: unknown auth command {args.auth_command}", file=sys.stderr)
+    return 2
+
+
+def _auth_manager_for(args: argparse.Namespace):
+    """Build an AuthManager against the standard state directory.
+
+    Kept separate from the panel: setting a password is an operator action done
+    on the host, and it must not require the dashboard to be running.
+    """
+    import os
+    from pathlib import Path
+
+    from .auth import AuthManager
+
+    state_dir = getattr(args, "state_dir", None) or os.environ.get(
+        "MESHDISPATCH_AUTH_STATE_DIR"
+    )
+    if not state_dir:
+        state_dir = str(Path.home() / ".local" / "share" / "meshdispatch" / "auth")
+    Path(state_dir).mkdir(parents=True, exist_ok=True)
+    return AuthManager(state_dir=state_dir)
+
+
+def _auth_set_password(args: argparse.Namespace) -> int:
+    """Prompt for a password twice and store only its scrypt hash.
+
+    The password is read with getpass so it is never echoed, never passed on the
+    command line (where it would land in the shell history and in `ps`), and
+    never written anywhere in plaintext.  Nobody but the operator running this
+    command ever sees it - including any agent asked to set it up.
+    """
+    import getpass
+
+    principal = args.principal or os.environ.get("MESHDISPATCH_PRINCIPAL") or "gu-reni"
+    manager = _auth_manager_for(args)
+
+    first = getpass.getpass(f"New password for {principal}: ")
+    if not first:
+        print("error: empty password refused", file=sys.stderr)
+        return 2
+    if len(first) < 8:
+        print("error: use at least 8 characters", file=sys.stderr)
+        return 2
+    second = getpass.getpass("Repeat it: ")
+    if first != second:
+        print("error: the two entries do not match", file=sys.stderr)
+        return 2
+
+    manager.set_password(principal, first)
+    del first, second
+
+    rec = manager.store.get_credentials(principal) or {}
+    stored = rec.get("password_hash") or ""
+    scheme = stored.split("$", 1)[0] or "unknown"
+    print(f"password set for {principal} (stored as {scheme} hash, plaintext discarded)")
+    return 0
+
+
+def _auth_check(args: argparse.Namespace) -> int:
+    import os
+
+    principal = args.principal or os.environ.get("MESHDISPATCH_PRINCIPAL") or "gu-reni"
+    manager = _auth_manager_for(args)
+    rec = manager.store.get_credentials(principal) or {}
+    keys = rec.get("authorized_keys") or []
+    has_pw = bool(rec.get("password_hash"))
+    devices = manager.store.list_devices(principal)
+    print(f"principal        : {principal}")
+    print(f"password set     : {'yes' if has_pw else 'no'}")
+    print(f"authorized keys  : {len(keys)}")
+    print(f"devices enrolled : {len(devices)}")
+    for d in devices:
+        print(f"  - {d.get('device_name')} confirmed={d.get('confirmed')}")
+    return 0
 
 
 def _device_dispatch(args: argparse.Namespace) -> int:

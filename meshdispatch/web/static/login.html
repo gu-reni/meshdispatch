@@ -23,49 +23,12 @@
 
     <div class="login__tabs" role="tablist" data-i18n-aria-label="login.method"
          aria-label="Sign-in method">
-      <button class="login__tab login__tab--active" id="tab-ssh" type="button"
-              role="tab" aria-selected="true" aria-controls="panel-ssh"
-              data-i18n="login.tab.ssh">SSH key</button>
       <button class="login__tab" id="tab-password" type="button"
               role="tab" aria-selected="false" aria-controls="panel-password"
               data-i18n="login.tab.password">Password</button>
     </div>
 
-    <section class="login__panel" id="panel-ssh" role="tabpanel" aria-labelledby="tab-ssh">
-      <label class="field">
-        <span class="field__label" data-i18n="common.principal">Principal</span>
-        <input class="field__control" type="text" id="ssh-principal"
-               autocomplete="username" autocapitalize="none" spellcheck="false" required>
-      </label>
-
-      <div class="task-form__actions">
-        <button class="btn" id="ssh-challenge" type="button"
-                data-i18n="login.ssh.getChallenge">Get challenge</button>
-      </div>
-
-      <div class="login__steps" id="ssh-steps" hidden>
-        <p class="field__label" data-i18n="login.ssh.step1">1. Sign this nonce on the machine that holds your key</p>
-        <pre class="login__command" id="ssh-command"></pre>
-        <p class="note" data-i18n="login.ssh.note">Then paste the contents of the generated signature file below.</p>
-
-        <label class="field">
-          <span class="field__label" data-i18n="login.ssh.step2">2. SSH signature</span>
-          <textarea class="field__control login__signature" id="ssh-signature"
-                    rows="6" autocomplete="off" spellcheck="false"
-                    data-i18n-placeholder="login.ssh.signaturePlaceholder"
-                    placeholder="-----BEGIN SSH SIGNATURE-----"></textarea>
-        </label>
-
-        <div class="task-form__actions">
-          <button class="btn" id="ssh-submit" type="button"
-                  data-i18n="login.ssh.submit">Sign in with key</button>
-        </div>
-      </div>
-
-      <p class="note task-form__result" id="ssh-result" hidden></p>
-    </section>
-
-    <section class="login__panel" id="panel-password" role="tabpanel" aria-labelledby="tab-password" hidden>
+    <section class="login__panel" id="panel-password">
       <label class="field">
         <span class="field__label" data-i18n="common.principal">Principal</span>
         <input class="field__control" type="text" id="password-principal"
