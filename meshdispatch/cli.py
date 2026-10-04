@@ -751,8 +751,16 @@ def _device_request(args: argparse.Namespace) -> int:
     payload = json.dumps(
         {"public_key": public_key, "display_name": args.name}, ensure_ascii=False
     ).encode("utf-8")
+    # Accept either the panel base URL or the full endpoint.  People naturally
+    # pass the base URL, and posting to "/" just yields a confusing 404.
+    url = args.url.rstrip("/")
+    if not url:
+        print("error: --to requires a URL", file=sys.stderr)
+        return 1
+    if not url.endswith("/api/pairings"):
+        url += "/api/pairings"
     req = urllib.request.Request(
-        args.url,
+        url,
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
