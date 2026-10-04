@@ -307,3 +307,48 @@ and having the machine present it (rather than the other way around) means the
 code is an unforgeable, short-lived handshake token: it is minted by the panel,
 shown to the machine once, and only the owner's TOTP-protected approval turns
 that request into an authorised device.
+
+## Pushing from the other machine
+
+Once the token exists, the other machine sends its local database to the panel:
+
+```bash
+# on the machine being watched
+meshdispatch push --to https://panel.example.com:8443 --token mdit-xxxx.yyyy --agent my-laptop
+```
+
+`--to` takes the panel's base URL; `/api/ingest` is appended for you. A full
+endpoint URL also works.
+
+Useful options:
+
+```bash
+meshdispatch push --to URL --token TOKEN --agent NAME --since 2026-10-01T00:00:00Z
+```
+
+`--since` sends only records created at or after that timestamp, which keeps a
+scheduled push small. The push is batched, and a failed batch is reported without
+aborting the rest, so a single bad record does not stop the run.
+
+The same data pushed twice changes nothing: records are matched on their origin
+and origin reference, so re-running a push after a network failure is safe.
+
+## Command reference
+
+Everything the CLI offers, for quick lookup:
+
+| Command | What it does |
+|---|---|
+| `meshdispatch sync --adapter all` | collect from the local agent logs |
+| `meshdispatch list` / `show <id>` | read tasks and their runs, messages and events |
+| `meshdispatch add` | register a task by hand |
+| `meshdispatch run-start` / `run-end` | record an execution |
+| `meshdispatch message` / `event` | append a conversation message or a process event |
+| `meshdispatch push --to URL --token TOKEN` | send this machine's data to a panel |
+| `meshdispatch token create --agent NAME` / `list` / `revoke <id>` | manage ingest tokens |
+| `meshdispatch agent add --name NAME --endpoint URL` / `list` / `show NAME` | manage the agents tasks can be dispatched to |
+| `meshdispatch approval list` / `show <id>` / `decide <id> --approve\|--reject` | read and decide the guarded-command queue |
+| `meshdispatch device keygen` | create a local keypair for enrolling this machine |
+| `meshdispatch device request --to URL --name NAME` | ask a panel to enrol this machine |
+| `meshdispatch device list` / `revoke <id>` | inspect and revoke authorised devices |
+| `python -m meshdispatch.web.server` | run the dashboard |
