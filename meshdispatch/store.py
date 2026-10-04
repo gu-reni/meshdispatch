@@ -128,6 +128,7 @@ CREATE INDEX IF NOT EXISTS idx_approvals_requested_at ON approvals(requested_at)
 CREATE TABLE IF NOT EXISTS pairings (
     id              TEXT PRIMARY KEY,
     code_hash       TEXT NOT NULL,
+    code            TEXT,
     display_name    TEXT NOT NULL,
     public_key      TEXT NOT NULL,
     key_fingerprint TEXT NOT NULL,
@@ -145,7 +146,13 @@ CREATE INDEX IF NOT EXISTS idx_pairings_status ON pairings(status);
 # Columns added since the phase-1 schema.  ``connect`` runs these as idempotent
 # ``ALTER TABLE`` statements against any pre-existing database, so an old DB is
 # upgraded in place and re-running never errors.
+#: The plaintext pairing code is kept while a request is pending so the owner can
+#: compare it against what the enrolling machine shows.  It is a one-time,
+#: short-lived code that on its own authorises nothing - approving still requires
+#: a second factor - so it is stored rather than held in process memory, which
+#: used to lose every pending code on a restart.
 _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("pairings", "code", "TEXT"),
     ("messages", "visibility", "TEXT NOT NULL DEFAULT 'local'"),
     ("runs", "source_key", "TEXT"),
     ("messages", "source_key", "TEXT"),
@@ -1376,16 +1383,18 @@ class Store:
         status: str,
         created_at: str,
         expires_at: str,
+        code: str | None = None,
     ) -> dict[str, Any]:
         conn = self.connect()
         try:
             conn.execute(
-                "INSERT INTO pairings (id, code_hash, display_name, public_key, "
+                "INSERT INTO pairings (id, code_hash, code, display_name, public_key, "
                 "key_fingerprint, status, created_at, expires_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     pairing_id,
                     code_hash,
+                    code,
                     display_name,
                     public_key,
                     key_fingerprint,

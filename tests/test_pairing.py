@@ -75,7 +75,17 @@ def _pub(keypair, comment="test-device"):
 # ---------------------------------------------------------------------------
 
 
-def test_create_pairing_returns_code_once_and_stores_only_hash(store, keypair):
+def test_create_pairing_hashes_the_code_and_keeps_it_verifiable(store, keypair):
+    """The code is both hashed (for checking) and kept (for the owner to compare).
+
+    The code has to be *displayed to the owner*: the whole point of the pairing
+    flow is that the server generates it and the owner compares it against what
+    the enrolling machine shows. Holding it only in process memory meant every
+    pending code vanished on restart, leaving the panel showing a dash and the
+    comparison impossible. It is a single-use, short-lived code that on its own
+    authorises nothing - approving still requires a second factor - so it is
+    stored while the request is pending and never returned once decided.
+    """
     result = create_pairing(store, public_key=_pub(keypair), display_name="host-b")
 
     assert result["status"] == "pending"
@@ -89,8 +99,8 @@ def test_create_pairing_returns_code_once_and_stores_only_hash(store, keypair):
     stored = store.get_pairing(result["id"])
     assert stored is not None
     assert stored["code_hash"] == hash_pairing_code(code)
-    assert "code" not in stored
-    assert code not in stored["code_hash"]
+    assert code not in stored["code_hash"]          # the hash must not leak it
+    assert stored["code"] == code                   # but it is kept to be shown
 
 
 def test_create_pairing_rejects_bad_key(store):

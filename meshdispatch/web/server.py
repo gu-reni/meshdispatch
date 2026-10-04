@@ -651,7 +651,10 @@ def create_app(
                 item = dict(pairing)
                 item.pop("code_hash", None)
                 if pairing["status"] == "pending":
-                    code = pairing_codes.get(pairing["id"])
+                    # Prefer the persisted code, so the owner can still compare it
+                    # after a restart; the in-memory copy covers a request created
+                    # moments ago in this process.
+                    code = pairing.get("code") or pairing_codes.get(pairing["id"])
                     if code:
                         item["code"] = code
                 out.append(item)

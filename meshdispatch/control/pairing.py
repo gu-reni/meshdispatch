@@ -221,6 +221,7 @@ def create_pairing(
     record = store.insert_pairing(
         pairing_id=pairing_id,
         code_hash=hash_pairing_code(code),
+        code=code,
         display_name=display_name,
         public_key=public_key,
         key_fingerprint=fingerprint,
