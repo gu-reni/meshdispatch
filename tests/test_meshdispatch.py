@@ -22,11 +22,23 @@ def store(tmp_path):
 
 
 def test_task_id_format_and_uniqueness():
-    ids = {models.generate_task_id() for _ in range(1000)}
-    assert len(ids) == 1000
+    """Ids match the documented format and collide at only the expected rate.
+
+    An id is ``md-<date>-<6 hex>``, a space of about 16.7 million, so demanding
+    that 1000 draws be *all* distinct asserts something false: the birthday
+    paradox gives a collision roughly 3% of the time, and this test used to fail
+    about one run in thirty for that reason alone. The format is the real
+    contract; uniqueness is probabilistic and is checked as such.
+    """
     pattern = re.compile(r"^md-\d{8}-[0-9a-f]{6}$")
-    for tid in ids:
+    draws = [models.generate_task_id() for _ in range(1000)]
+    for tid in draws:
         assert pattern.match(tid), tid
+
+    distinct = len(set(draws))
+    # Expected collisions ~= n^2 / (2 * space) ~= 0.03; allow a generous margin
+    # before calling it a real defect.
+    assert distinct >= 995, f"{1000 - distinct} collisions in 1000 draws is too many"
 
 
 def test_add_task_id_matches_format(store):
